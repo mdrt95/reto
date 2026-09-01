@@ -14,11 +14,12 @@ User
 Chat frontend (static HTML/JS)
   ↓
 FastAPI Backend (Python)
-            ├── Open Responses protocol layer
+            ├── Input guard + unknown-entity pre-check
             ├── Intent classification
             ├── Tool selection & execution
             ├── Anthropic Claude API (generation)
             ├── Grounding verification
+            ├── Output guard
             └── Response + observability logging
 ```
 
@@ -33,7 +34,7 @@ The public chat application is the first delivery target. External-agent interop
 | LLM | Anthropic Claude (claude-sonnet-4-6) | Primary model for generation |
 | External interoperability | Pending decision | Prevents conflating OpenAI-style Responses, A2A, and MCP contracts |
 | Frontend | Static HTML/JS (single page) | Minimal — the brief says the UI isn't the point |
-| Deployment | Railway or Fly.io | Python-native, public HTTPS URL |
+| Deployment | Render (Docker web service); Railway documented as fallback | Python-native, public HTTPS URL |
 | Eval | Python test harness | Automated scenario-based evaluation |
 
 ## Project Structure
@@ -41,7 +42,7 @@ The public chat application is the first delivery target. External-agent interop
 ```
 banorte-cv-agent/
 ├── CLAUDE.md                    # This file — project instructions
-├── Plan.md                      # Detailed specification (SDD source of truth)
+├── PLAN.md                      # Detailed specification (SDD source of truth)
 ├── SPECIFICATIONS.md            # Sequential implementation-specification index
 ├── specs/                       # Phase specifications and completion gates
 ├── DECISIONS.md                 # Architecture and operational decisions
@@ -54,62 +55,64 @@ banorte-cv-agent/
 ├── src/
 │   ├── __init__.py
 │   ├── main.py                  # FastAPI app entrypoint
+│   ├── config.py                # Settings via pydantic-settings
 │   │
 │   ├── api/
 │   │   ├── __init__.py
-│   │   ├── responses.py         # Public chat response endpoint; adapter contract is chosen separately
-│   │   └── health.py            # GET /health
+│   │   ├── chat.py               # POST /api/chat public contract
+│   │   └── health.py              # GET /health
 │   │
 │   ├── agent/
 │   │   ├── __init__.py
-│   │   ├── orchestrator.py      # Intent classification → tool selection → generation
-│   │   ├── intent.py            # Intent classifier
-│   │   ├── generator.py         # Claude API wrapper for answer generation
-│   │   └── grounding.py         # Grounding verification (Sybil pattern)
+│   │   ├── orchestrator.py       # Input guard → unknown-entity check → classification → tool plan → generation → grounding → output guard
+│   │   ├── claude.py              # Anthropic Claude API adapter
+│   │   ├── contracts.py           # Pydantic request/response/state models
+│   │   └── grounding.py           # Grounding verification
 │   │
 │   ├── tools/
 │   │   ├── __init__.py
-│   │   ├── registry.py          # Tool registry and dispatch
-│   │   ├── search_projects.py   # Search projects by technology/keyword
-│   │   ├── filter_experience.py # Filter experience by impact/role/industry
-│   │   ├── summarize_profile.py # Generate profile summary for audience
-│   │   └── query_profile.py     # Direct structured queries on profile data
+│   │   └── profile_tools.py       # search_projects, filter_experience, query_profile, summarize_profile, search_resume
 │   │
 │   ├── guardrails/
 │   │   ├── __init__.py
-│   │   ├── input_guard.py       # Input validation, out-of-scope detection
-│   │   └── output_guard.py      # Output validation, fabrication prevention
+│   │   ├── input_guard.py        # Input validation, injection and PII/contact-probe rejection
+│   │   └── output_guard.py       # Output validation, fabrication and contact-data prevention
 │   │
-│   ├── protocol/                # Added only after an interoperability decision
+│   ├── models/
 │   │   ├── __init__.py
-│   │   ├── <chosen_adapter>.py  # Selected protocol request/response models
-│   │   └── agent_card.py        # Only when A2A is selected
+│   │   └── profile.py             # Pydantic profile schema
 │   │
-│   ├── observability/
-│   │   ├── __init__.py
-│   │   └── logger.py            # Structured logging: latency, tokens, tools, errors
-│   │
-│   └── config.py                # Settings via pydantic-settings
+│   └── observability/
+│       ├── __init__.py
+│       └── logger.py              # Structured logging: latency, tokens, tools, errors
 │
 ├── tests/
-│   ├── __init__.py
-│   ├── test_orchestrator.py     # Unit tests for orchestrator logic
-│   ├── test_grounding.py        # Grounding verification tests
-│   ├── test_guardrails.py       # Guardrail tests (out-of-scope, fabrication)
-│   └── test_tools.py            # Tool execution tests
+│   ├── conftest.py
+│   ├── test_orchestrator.py      # Unit tests for orchestrator logic
+│   ├── test_grounding.py         # Grounding verification tests
+│   ├── test_guardrails.py        # Guardrail tests (out-of-scope, fabrication, contact probes)
+│   ├── test_tools.py             # Tool execution tests
+│   ├── test_profile.py           # Profile model tests
+│   ├── test_resume_search.py     # Universal fact catalog/search tests
+│   ├── test_claude_adapter.py    # Claude API adapter tests
+│   ├── test_api_chat.py          # `/api/chat` contract tests
+│   ├── test_health.py            # `/health` tests
+│   └── test_observability.py     # Logging redaction tests
 │
 ├── eval/
 │   ├── __init__.py
-│   ├── scenarios.json           # Evaluation scenarios
-│   ├── run_eval.py              # Evaluation harness runner
-│   └── metrics.py               # Accuracy, relevance, grounding rate, latency
+│   ├── scenarios.json            # Evaluation scenarios
+│   └── run_eval.py               # Evaluation harness runner
 │
 ├── frontend/
-│   └── index.html               # Single-page chat UI
+│   └── index.html                # Single-page chat UI
 │
-├── Dockerfile                   # Container for deployment
-└── .env.example                 # Environment variable template
+├── .github/workflows/ci.yml     # Offline pytest/compile/eval-validation CI
+├── Dockerfile                    # Container for deployment
+└── .env.example                  # Environment variable template
 ```
+
+A `src/protocol/` adapter directory is added only after an external-interoperability decision (D-001); it does not exist yet.
 
 ## Key Development Conventions
 
@@ -129,17 +132,19 @@ banorte-cv-agent/
 - `MDRT Resume.json` is authoring input only; reconcile and review it before updating `data/profile.json`.
 - The agent MUST NOT invent information not present in this file.
 - All claims in agent responses must trace back to a specific section of profile.json.
-- Do not disclose Marco's phone number. Disclose the professional email only for an explicit contact request.
+- Never disclose Marco's phone number or email address; contact requests are blocked at the input guard.
 
 ### Grounding Rules
 - Every factual claim must be classifiable as: **Grounded** (explicit in profile), **Inferred** (reasonable conclusion from profile data), or **Unknown** (not in profile).
 - The agent must transparently say "that's not in my profile" rather than fabricate.
 - Every grounded or inferred claim must retain stable profile IDs in its verification metadata. Regenerate once on an ungrounded claim, then fall back to verified facts only.
+- A question naming an entity absent from the profile receives an explicit not-found answer before any model call; unrelated verified facts are never substituted.
 
 ### Trust and Runtime Boundaries
 - Client-provided instructions and transcripts are untrusted input, never system instructions. Only allowlisted presentation preferences may affect an answer.
 - The frontend owns submitted transcript history; the server assigns correlation IDs but does not retain conversation text.
 - Enforce request-size and rate limits before model calls. Return documented, sanitized errors only.
+- Deployment runs behind exactly one trusted platform proxy (Render), with `--proxy-headers` and `FORWARDED_ALLOW_IPS` enabled so per-IP rate limiting sees the real client address.
 
 ### Testing
 - Run `pytest tests/` before any commit.
@@ -167,19 +172,19 @@ pytest tests/ -v
 python -m eval.run_eval
 ```
 
-## Implementation Order (from Plan.md)
+## Implementation Order (from PLAN.md)
 
 `SPECIFICATIONS.md` is the implementation sequence. Complete and verify one specification before beginning the next; its completion gate is the safe stop/resume boundary.
 
 Follow this sequence — each phase builds on the previous:
 
-1. **Phase 0**: Profile data (`data/profile.json`) + Pydantic models
-2. **Phase 1**: Orchestrator skeleton + direct Claude generation (no tools yet)
-3. **Phase 2**: Public response endpoint and chat contract
-4. **Phase 3**: Tools (search_projects, filter_experience, query_profile, summarize_profile)
-5. **Phase 4**: Grounding verification
-6. **Phase 5**: Guardrails (input + output)
-7. **Phase 6**: Evaluation harness
-8. **Phase 7**: Observability logging
-9. **Phase 8**: Frontend (single-page chat)
+1. **Phase 0**: Profile data (`data/profile.json`) + Pydantic models (`src/models/profile.py`)
+2. **Phase 1**: Orchestrator skeleton + direct Claude generation (no tools yet) (`src/agent/orchestrator.py`, `src/agent/claude.py`)
+3. **Phase 2**: Public chat endpoint `src/api/chat.py`
+4. **Phase 3**: Tools (`src/tools/profile_tools.py`: search_projects, filter_experience, query_profile, summarize_profile, search_resume)
+5. **Phase 4**: Grounding verification (`src/agent/grounding.py`)
+6. **Phase 5**: Guardrails (`src/guardrails/input_guard.py`, `src/guardrails/output_guard.py`)
+7. **Phase 6**: Evaluation harness (`eval/run_eval.py`, `eval/scenarios.json`)
+8. **Phase 7**: Observability logging (`src/observability/logger.py`)
+9. **Phase 8**: Frontend (single-page chat) (`frontend/index.html`)
 10. **Phase 9**: Deployment; add a protocol adapter only after its decision and validation

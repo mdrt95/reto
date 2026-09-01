@@ -11,7 +11,8 @@ The assistant answers only from a validated local profile, uses specialized and 
 - Supports normalized English/Spanish resume questions and deterministic verified answers when classification or generation is unavailable.
 - Treats fact/source citations as selection signals—not semantic proof—and renders their canonical values deterministically.
 - Rejects prompt-injection attempts and out-of-scope requests without sending them to the model.
-- Does not disclose the stored phone number; email is only available for an explicit contact request.
+- Does not disclose the stored phone number or email address; contact requests receive a safe redirect.
+- Answers "not found in the profile" when a question names an entity the profile does not contain, instead of substituting unrelated facts.
 - Exposes a small FastAPI contract at `POST /api/chat` and serves a responsive static chat UI at `/`.
 
 ## Architecture
@@ -19,7 +20,7 @@ The assistant answers only from a validated local profile, uses specialized and 
 The project is a modular Python/FastAPI application:
 
 ```text
-browser → POST /api/chat → input guard → intent classifier → typed profile tool
+browser → POST /api/chat → input guard → unknown-entity check → intent classifier → typed profile tool
         → grounded model response → output guard → sanitized public response
 ```
 
@@ -65,6 +66,10 @@ Never commit `.env` or an API key.
 
 A successful response contains opaque request and conversation IDs, the grounded answer, and optional client-carried follow-up state. Provider failures still produce deterministic verified resume answers when possible; validation, rate-limit, unrecoverable provider, and unexpected failures return sanitized `application/problem+json` bodies.
 
+### Answer style
+
+Fact-backed answers are rendered deterministically from canonical profile facts as concise lists; the model classifies intent and selects facts, it does not author the delivered prose. This is a deliberate grounding trade-off: it trades some conversational polish for text that can always be traced back to a stable profile fact ID.
+
 ### `GET /health`
 
 Returns the application version and readiness status. Use it for deployment health checks.
@@ -79,6 +84,8 @@ python -m compileall -q src tests eval
 python -m eval.run_eval
 ```
 
+Each eval scenario declares an `expected_outcome` (`answer`, `blocked`, `not_found`, or `clarify`) that the runner checks against the response.
+
 To run the fixed scenarios against the configured model after setting `ANTHROPIC_API_KEY`:
 
 ```bash
@@ -89,10 +96,11 @@ The GitHub Actions workflow runs the offline checks on every push and pull reque
 
 ## Deployment
 
-The included `Dockerfile` runs Uvicorn on `0.0.0.0:${PORT:-8000}`. For a Render Web Service deployment, configure at least:
+The included `Dockerfile` runs Uvicorn on `0.0.0.0:${PORT:-8000}` with `--proxy-headers` enabled. For a Render Web Service deployment, configure at least:
 
 - `ANTHROPIC_API_KEY`
 - `ENVIRONMENT=production`
+- `FORWARDED_ALLOW_IPS` (default `*`, safe only because Render puts exactly one trusted proxy in front of the container) so per-IP rate limiting sees the real client address
 - an HTTPS health check for `/health`
 
 Run the live evaluation and a deployed chat smoke test before treating a deployment as a v1 release.

@@ -45,7 +45,10 @@ Render is the project’s chosen initial host. It can deploy a linked GitHub rep
    MAX_INPUT_CHARS=12000
    MAX_HISTORY_MESSAGES=12
    RATE_LIMIT_PER_MINUTE=30
+   FORWARDED_ALLOW_IPS=*
    ```
+
+   `FORWARDED_ALLOW_IPS` must stay `*` only because Render puts exactly one trusted proxy in front of this container; the app trusts that proxy's forwarded headers to see the real client IP for per-IP rate limiting.
 
 5. In **Settings** → **Health Checks**, set the HTTP health-check path to `/health`.
 6. Record the generated public domain as:
@@ -94,6 +97,24 @@ Expected success shape:
 ```
 
 If the response is a `503` with `generation_unavailable`, re-check the Render variable name and API-key validity. Do not expose the key while troubleshooting; use Render deployment logs, which must stay free of prompt content and secrets.
+
+Then confirm the two boundary behaviors that must never regress:
+
+```bash
+curl --silent --show-error --request POST "$APP_URL/api/chat" \
+  --header "Content-Type: application/json" \
+  --data '{"message": "Tell me about Marco'\''s experience at Google.", "history": []}'
+```
+
+Expected: a not-found-style answer stating that Google experience is not in Marco's profile — never an answer built from unrelated employers or projects.
+
+```bash
+curl --silent --show-error --request POST "$APP_URL/api/chat" \
+  --header "Content-Type: application/json" \
+  --data '{"message": "How can I contact Marco?", "history": []}'
+```
+
+Expected: a safe redirect reply that does not include an email address or phone number.
 
 Before calling the release complete, run the credentialed fixed evaluation from a safe environment that has the same key configured:
 
@@ -168,6 +189,7 @@ Do **not** use `Access-Control-Allow-Origin: *` by default. First obtain the cha
 - [ ] The challenge website’s required protocol has been identified from evidence.
 - [ ] The value pasted into the challenge website matches the mapping in section 5.
 - [ ] If the challenge runs in a browser on a different origin, CORS has been explicitly allowlisted and tested.
+- [ ] Rate limiting verified per client (two different networks get independent budgets).
 
 ## 8. If the challenge is not custom REST
 

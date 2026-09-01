@@ -17,13 +17,12 @@ from src.config import Settings
 from src.models.profile import Profile
 
 
-def profile_prompt_payload(profile: Profile, *, contact_requested: bool) -> dict[str, Any]:
+def profile_prompt_payload(profile: Profile) -> dict[str, Any]:
     """Remove private contact fields before the trusted profile reaches the provider."""
     payload = profile.model_dump(mode="json")
     personal = payload["personal"]
     personal.pop("phone", None)
-    if not contact_requested:
-        personal.pop("email", None)
+    personal.pop("email", None)
     return payload
 
 
@@ -131,13 +130,12 @@ class ClaudeResponseGenerator:
         profile: Profile,
         tool_result: object | None,
         allowed_source_ids: set[str],
-        contact_requested: bool,
         allowed_fact_ids: set[str] | None = None,
     ) -> GeneratedResponse:
         """Request claims and citations in a Pydantic-validated provider response."""
         prompt = {
             "task": "Answer only from the professional profile data supplied.",
-            "profile": profile_prompt_payload(profile, contact_requested=contact_requested),
+            "profile": profile_prompt_payload(profile),
             "user_message": message,
             "history": history,
             "tool_result": tool_result.model_dump(mode="json") if hasattr(tool_result, "model_dump") else None,

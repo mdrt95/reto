@@ -73,6 +73,16 @@ def test_normalization_handles_accents_punctuation_and_synonyms() -> None:
     assert any("Semantic search" in match.text for match in result.matches)
 
 
+def test_unmatched_named_entity_term_is_reported() -> None:
+    """A search term absent from every candidate must be surfaced for boundary wording."""
+    profile = load_profile("data/profile.json")
+
+    result = search_resume(profile, SearchResumeArguments(query="experience at Google"))
+
+    assert result.profile_missing is True
+    assert result.unmatched_terms == ["google"]
+
+
 def test_missing_career_preferences_are_explicit() -> None:
     profile = load_profile("data/profile.json")
 
@@ -81,3 +91,23 @@ def test_missing_career_preferences_are_explicit() -> None:
     assert result.topic == "career_preferences"
     assert result.matches == []
     assert result.profile_missing is True
+
+
+@pytest.mark.parametrize(
+    ("message", "expected"),
+    [
+        ("tell me about Google", ["Google"]),
+        ("Does Marco know Node.js?", []),
+        ("Has Marco used ASP.NET Core?", []),
+        ("What Is Marco's Role?", []),
+        ("Did Marco work at Banorte or Microsoft?", ["Banorte", "Microsoft"]),
+        ("Tell me about Sybil and FAISS.", []),
+    ],
+)
+def test_unknown_entity_check_handles_case_dots_and_title_case(message: str, expected: list[str]) -> None:
+    """Sentence position, dotted product names, and title-case prose must not skew detection."""
+    from src.tools.profile_tools import find_unknown_entities
+
+    profile = load_profile("data/profile.json")
+
+    assert find_unknown_entities(profile, message) == expected

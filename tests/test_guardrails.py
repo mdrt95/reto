@@ -23,15 +23,27 @@ def test_phone_number_is_not_allowed_in_output() -> None:
     assert result.code == "phone_disclosure"
 
 
-def test_email_requires_an_explicit_contact_request() -> None:
-    """Public email must not be disclosed merely because it exists in source data."""
+def test_email_is_never_disclosed() -> None:
+    """Public email must never be disclosed, even for an explicit contact request."""
     profile = load_profile("data/profile.json")
 
-    result = evaluate_output(
-        f"Marco's email is {profile.personal.email}.",
-        profile,
-        contact_requested=False,
-    )
+    result = evaluate_output(f"Marco's email is {profile.personal.email}.", profile)
 
     assert result.allowed is False
     assert result.code == "email_disclosure"
+
+
+def test_english_contact_request_is_blocked_by_input_guard() -> None:
+    """An explicit request for contact details must never reach orchestration."""
+    result = evaluate_input("How can I contact Marco?")
+
+    assert result.allowed is False
+    assert result.code == "pii_probe"
+
+
+def test_spanish_contact_request_is_blocked_by_input_guard() -> None:
+    """The same contact-request policy must apply in Spanish."""
+    result = evaluate_input("¿Cómo puedo contactar a Marco?")
+
+    assert result.allowed is False
+    assert result.code == "pii_probe"

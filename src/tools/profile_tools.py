@@ -50,6 +50,7 @@ class ResumeSearchResult(BaseModel):
     topic: ResumeTopic
     matches: list[ResumeFact] = Field(default_factory=list)
     profile_missing: bool = False
+    unmatched_terms: list[str] = Field(default_factory=list)
 
 
 class ProjectMatch(BaseModel):
@@ -164,6 +165,9 @@ _STOP_WORDS = {
     "i", "in", "is", "la", "las", "lo", "los", "marco", "me", "mi", "que", "tell",
     "the", "tu", "tus", "what", "which", "your", "you",
     "y",
+    "at", "with", "for", "on", "from", "to", "of", "did", "do", "does", "was",
+    "were", "are", "be", "been", "any", "s", "con", "para", "por", "sobre",
+    "desde", "hasta", "ha", "han", "tiene", "fue", "son", "un", "una", "al",
 }
 
 
@@ -181,6 +185,7 @@ def detect_response_language(text: str) -> Literal["en", "es"]:
     spanish_markers = {
         "cual", "que", "como", "con", "construiste", "experiencia", "proyecto",
         "puesto", "tecnologia", "tu", "y",
+        "de", "la", "el", "los", "las", "del", "en", "es",
     }
     return "es" if set(normalized.split()) & spanish_markers else "en"
 
@@ -333,6 +338,72 @@ def build_resume_fact_catalog(profile: Profile) -> list[ResumeFact]:
     return facts
 
 
+_CAPITALIZED_TOKEN_RE = re.compile(r"\b[A-ZÁÉÍÓÚÑ][A-Za-zÁÉÍÓÚÑáéíóúñ0-9\-\.]+")
+_WORD_RE = re.compile(r"[A-Za-zÁÉÍÓÚÑáéíóúñ0-9][A-Za-zÁÉÍÓÚÑáéíóúñ0-9\-\.']*")
+# Split only on sentence punctuation; a dot inside a token (Node.js, ASP.NET) is not a boundary.
+_SENTENCE_SPLIT_RE = re.compile(r"[?!¿¡]+|\.(?=\s|$)")
+_TITLE_CASE_RATIO = 0.6
+
+
+def _profile_known_tokens(profile: Profile) -> set[str]:
+    """Build the normalized-token vocabulary supported anywhere in the profile."""
+    catalog = build_resume_fact_catalog(profile)
+    parts: list[str] = []
+    for fact in catalog:
+        parts.append(fact.text)
+        parts.extend(fact.keywords)
+        if fact.entity:
+            parts.append(fact.entity)
+    tokens = set(normalize_resume_text(" ".join(parts)).split())
+    # Dotted product names are also known by their pieces (asp.net -> asp, net).
+    tokens.update(piece for token in list(tokens) for piece in token.split(".") if piece)
+    return tokens
+
+
+def _is_title_case(sentence: str) -> bool:
+    """Detect prose where capitalization is stylistic, not a proper-noun signal."""
+    words = _WORD_RE.findall(sentence)
+    if len(words) < 3:
+        return False
+    capitalized = sum(1 for word in words if word[0].isupper())
+    return capitalized / len(words) >= _TITLE_CASE_RATIO
+
+
+def find_unknown_entities(profile: Profile, message: str) -> list[str]:
+    """Find capitalized, non-sentence-initial tokens absent from every profile fact.
+
+    A named entity the profile never mentions must produce a not-found answer rather
+    than an answer assembled from unrelated verified facts. Sentence-initial words and
+    title-case prose are skipped because their capitalization carries no entity signal.
+    """
+    name_tokens = {normalize_resume_text(part) for part in profile.personal.name.split()}
+    known_tokens = _profile_known_tokens(profile)
+    unknown: list[str] = []
+    seen: set[str] = set()
+    for sentence in _SENTENCE_SPLIT_RE.split(message):
+        if _is_title_case(sentence):
+            continue
+        first_word = _WORD_RE.search(sentence)
+        sentence_start = first_word.start() if first_word else -1
+        for match in _CAPITALIZED_TOKEN_RE.finditer(sentence):
+            if match.start() == sentence_start:
+                continue
+            raw_token = match.group(0).rstrip(".-")
+            if raw_token.endswith("'s") or raw_token.endswith("\u2019s"):
+                raw_token = raw_token[:-2]
+            normalized_token = normalize_resume_text(raw_token)
+            if not normalized_token or normalized_token in name_tokens or normalized_token in _STOP_WORDS:
+                continue
+            singular = normalized_token[:-1] if normalized_token.endswith("s") and len(normalized_token) > 1 else normalized_token
+            if normalized_token in known_tokens or singular in known_tokens:
+                continue
+            if normalized_token in seen:
+                continue
+            seen.add(normalized_token)
+            unknown.append(raw_token)
+    return unknown
+
+
 def _detect_topic(normalized_query: str, catalog: list[ResumeFact]) -> ResumeTopic | None:
     for topic, phrases in _TOPIC_PHRASES.items():
         if any(normalize_resume_text(phrase) in normalized_query for phrase in phrases):
@@ -368,12 +439,23 @@ def search_resume(profile: Profile, arguments: SearchResumeArguments) -> ResumeS
         for phrase in _TOPIC_PHRASES[topic]
         for word in normalize_resume_text(phrase).split()
     }
-    query_terms = set(normalized_query.split()) - _STOP_WORDS - topic_words
+    query_term_list = [
+        term
+        for term in dict.fromkeys(normalized_query.split())
+        if term not in _STOP_WORDS and term not in topic_words
+    ]
+    query_terms = set(query_term_list)
+    term_matched = {term: False for term in query_term_list}
     scored: list[tuple[int, ResumeFact]] = []
     for fact in candidates:
         haystack = normalize_resume_text(" ".join([fact.text, *fact.keywords, fact.entity or ""]))
-        score = sum(1 for term in query_terms if term in haystack)
+        score = 0
+        for term in query_terms:
+            if term in haystack:
+                score += 1
+                term_matched[term] = True
         scored.append((score, fact))
+    unmatched_terms = [term for term in query_term_list if not term_matched[term]]
     if query_terms and any(score for score, _ in scored):
         candidates = [fact for score, fact in scored if score > 0]
     elif query_terms:
@@ -384,6 +466,7 @@ def search_resume(profile: Profile, arguments: SearchResumeArguments) -> ResumeS
         topic=topic,
         matches=candidates[: arguments.limit],
         profile_missing=not candidates,
+        unmatched_terms=unmatched_terms,
     )
 
 

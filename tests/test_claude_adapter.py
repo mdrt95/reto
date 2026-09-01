@@ -11,11 +11,11 @@ from src.config import Settings
 from src.models.profile import load_profile
 
 
-def test_model_payload_never_contains_phone_or_unsolicited_email() -> None:
-    """The provider must not receive contact data unrelated to the current request."""
+def test_model_payload_never_contains_phone_or_email() -> None:
+    """The provider must never receive private contact data, with no disclosure flag."""
     profile = load_profile("data/profile.json")
 
-    payload = profile_prompt_payload(profile, contact_requested=False)
+    payload = profile_prompt_payload(profile)
 
     assert "phone" not in payload["personal"]
     assert "email" not in payload["personal"]
@@ -106,7 +106,6 @@ def test_response_generator_retries_once_after_schema_invalid_http_success() -> 
         profile=load_profile("data/profile.json"),
         tool_result=None,
         allowed_source_ids={"experience:exp-global-payments"},
-        contact_requested=False,
     )
 
     assert response.text == "Global Payments (EVO Payments México)"

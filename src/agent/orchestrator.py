@@ -33,10 +33,16 @@ from src.tools.profile_tools import (
     filter_experience,
     build_resume_fact_catalog,
     detect_response_language,
+    find_unknown_entities,
     query_profile,
     search_projects,
     search_resume,
     summarize_profile,
+)
+
+_RANKING_MARKERS = (
+    "rank", "ranking", "best to worst", "worst to best",
+    "ordena", "clasifica", "mejor a peor", "peor a mejor", "del mejor",
 )
 
 
@@ -57,7 +63,6 @@ class ResponseGenerator(Protocol):
         profile: Profile,
         tool_result: object | None,
         allowed_source_ids: set[str],
-        contact_requested: bool,
         allowed_fact_ids: set[str] | None = None,
     ) -> GeneratedResponse: ...
 
@@ -88,6 +93,22 @@ class AgentService:
                 trace=AgentTrace(guardrail_input="blocked"),
             )
 
+        unknown_entities = find_unknown_entities(self._profile, message)
+        if unknown_entities:
+            language = detect_response_language(message)
+            entities = ", ".join(unknown_entities)
+            answer = (
+                f"No encontré nada sobre {entities} en el perfil de Marco, "
+                "así que no puedo opinar al respecto."
+                if language == "es"
+                else f"I couldn't find anything about {entities} in Marco's profile, "
+                "so I can't comment on it."
+            )
+            return AgentResponse(
+                answer=answer,
+                trace=AgentTrace(grounding_status="profile_missing"),
+            )
+
         follow_up = self._follow_up_plan(message, state)
         if follow_up == "clarify":
             language = detect_response_language(message)
@@ -96,7 +117,28 @@ class AgentService:
                 if language == "es"
                 else "Which part or item from the previous answer do you mean?"
             )
-            return AgentResponse(answer=answer, trace=AgentTrace(), state=state)
+            return AgentResponse(
+                answer=answer,
+                trace=AgentTrace(grounding_status="clarification"),
+                state=state,
+            )
+
+        normalized_message = " ".join(message.casefold().split())
+        if any(marker in normalized_message for marker in _RANKING_MARKERS):
+            language = detect_response_language(message)
+            answer = (
+                "No puedo ordenar la experiencia de Marco de forma subjetiva. Indica un "
+                "criterio objetivo del perfil, como una tecnología, etiqueta o rol, y "
+                "filtraré por él."
+                if language == "es"
+                else "I can't rank Marco's experience subjectively. Tell me an objective "
+                "criterion from the profile, such as a technology, tag, or role, and "
+                "I'll filter by it."
+            )
+            return AgentResponse(
+                answer=answer,
+                trace=AgentTrace(grounding_status="clarification"),
+            )
 
         try:
             decision = self._classifier.classify(message, history)
@@ -107,8 +149,16 @@ class AgentService:
                     raise
                 decision = IntentDecision(intent=Intent.FOLLOW_UP, confidence=1.0)
         if decision.intent in {Intent.OUT_OF_SCOPE, Intent.ADVERSARIAL}:
+            language = detect_response_language(message)
+            answer = (
+                "Me enfoco en el perfil profesional de Marco, su experiencia, habilidades "
+                "y proyectos. ¿Qué te gustaría saber?"
+                if language == "es"
+                else "I'm focused on Marco's professional profile, experience, skills, and "
+                "projects. What would you like to know?"
+            )
             return AgentResponse(
-                answer="I'm focused on Marco's professional profile, experience, skills, and projects. What would you like to know?",
+                answer=answer,
                 trace=AgentTrace(
                     guardrail_input="blocked",
                     intent=decision.intent.value,
@@ -116,9 +166,19 @@ class AgentService:
                 ),
             )
         if decision.confidence < 0.7 and self._resume_search_arguments(message, state) is None:
+            language = detect_response_language(message)
+            answer = (
+                "¿Podrías aclarar a qué parte del perfil profesional de Marco te refieres?"
+                if language == "es"
+                else "Could you clarify which part of Marco's professional profile you mean?"
+            )
             return AgentResponse(
-                answer="Could you clarify which part of Marco's professional profile you mean?",
-                trace=AgentTrace(intent=decision.intent.value, intent_confidence=decision.confidence),
+                answer=answer,
+                trace=AgentTrace(
+                    intent=decision.intent.value,
+                    intent_confidence=decision.confidence,
+                    grounding_status="clarification",
+                ),
             )
 
         tool_name, tool_result = self._execute_tool(decision, message)
@@ -137,7 +197,6 @@ class AgentService:
             return self._profile_missing_response(decision, tool_result, tool_name)
         allowed_sources = profile_source_ids(self._profile)
         selected_fact_ids = self._selected_fact_ids(tool_result)
-        contact_requested = self._is_explicit_contact_request(message)
         try:
             generated = self._generator.generate(
                 message=message,
@@ -146,7 +205,6 @@ class AgentService:
                 tool_result=tool_result,
                 allowed_source_ids=allowed_sources,
                 allowed_fact_ids=selected_fact_ids,
-                contact_requested=contact_requested,
             )
         except GenerationUnavailableError:
             fallback = self._tool_fallback_response(
@@ -154,7 +212,6 @@ class AgentService:
                 tool_name=tool_name,
                 tool_result=tool_result,
                 tool_result_count=tool_result_count,
-                contact_requested=contact_requested,
                 message=message,
             )
             if fallback is not None:
@@ -163,7 +220,7 @@ class AgentService:
         grounding = verify_claims(
             self._profile,
             generated.claims,
-            selected_fact_ids=selected_fact_ids or None,
+            selected_fact_ids=selected_fact_ids,
         )
         if grounding.claim_fact_ids:
             rendered = self._fact_selection_response(
@@ -172,7 +229,6 @@ class AgentService:
                 tool_name=tool_name,
                 tool_result=tool_result,
                 tool_result_count=tool_result_count,
-                contact_requested=contact_requested,
                 message=message,
             )
             if rendered is not None:
@@ -186,7 +242,6 @@ class AgentService:
                     tool_result=tool_result,
                     allowed_source_ids=allowed_sources,
                     allowed_fact_ids=selected_fact_ids,
-                    contact_requested=contact_requested,
                 )
             except GenerationUnavailableError:
                 fallback = self._tool_fallback_response(
@@ -194,7 +249,6 @@ class AgentService:
                     tool_name=tool_name,
                     tool_result=tool_result,
                     tool_result_count=tool_result_count,
-                    contact_requested=contact_requested,
                     message=message,
                 )
                 if fallback is not None:
@@ -203,7 +257,7 @@ class AgentService:
             grounding = verify_claims(
                 self._profile,
                 generated.claims,
-                selected_fact_ids=selected_fact_ids or None,
+                selected_fact_ids=selected_fact_ids,
             )
         accepted_claim_indexes = list(grounding.claim_sources)
         accepted_source_ids = [
@@ -233,8 +287,16 @@ class AgentService:
             if not verified_facts:
                 verified_facts, accepted_source_ids = self._verified_tool_facts(tool_result)
             if not verified_facts:
+                language = detect_response_language(message)
+                answer = (
+                    "Solo puedo confirmar información explícitamente respaldada por el "
+                    "perfil de Marco."
+                    if language == "es"
+                    else "I can only confirm information that is explicitly supported by "
+                    "Marco's profile."
+                )
                 return AgentResponse(
-                    answer="I can only confirm information that is explicitly supported by Marco's profile.",
+                    answer=answer,
                     trace=AgentTrace(
                         intent=decision.intent.value,
                         intent_confidence=decision.confidence,
@@ -245,14 +307,18 @@ class AgentService:
                 )
             answer = "\n\n".join(verified_facts)
 
-        output_result = evaluate_output(
-            answer,
-            self._profile,
-            contact_requested=contact_requested,
-        )
+        output_result = evaluate_output(answer, self._profile)
         if not output_result.allowed:
+            language = detect_response_language(message)
+            answer = (
+                "Puedo ayudarte con el perfil profesional público de Marco, pero no "
+                "puedo proporcionar esa información."
+                if language == "es"
+                else "I can help with Marco's public professional profile, but I can't "
+                "provide that information."
+            )
             return AgentResponse(
-                answer="I can help with Marco's public professional profile, but I can't provide that information.",
+                answer=answer,
                 trace=AgentTrace(
                     tool_name=tool_name,
                     intent=decision.intent.value,
@@ -337,7 +403,6 @@ class AgentService:
         tool_name: str | None,
         tool_result: ToolResult | None,
         tool_result_count: int,
-        contact_requested: bool,
         message: str,
     ) -> AgentResponse | None:
         """Return verified deterministic facts after model generation is unavailable."""
@@ -349,11 +414,7 @@ class AgentService:
             if isinstance(tool_result, ResumeSearchResult)
             else "\n\n".join(verified_facts)
         )
-        output_result = evaluate_output(
-            answer,
-            self._profile,
-            contact_requested=contact_requested,
-        )
+        output_result = evaluate_output(answer, self._profile)
         if not output_result.allowed:
             return None
         return AgentResponse(
@@ -377,7 +438,6 @@ class AgentService:
         tool_name: str | None,
         tool_result: ToolResult | None,
         tool_result_count: int,
-        contact_requested: bool,
         message: str,
     ) -> AgentResponse | None:
         """Render provider-selected fact IDs exclusively from canonical fact values."""
@@ -404,11 +464,7 @@ class AgentService:
             matches=selected_facts,
         )
         answer = self._render_resume_result(result)
-        output_result = evaluate_output(
-            answer,
-            self._profile,
-            contact_requested=contact_requested,
-        )
+        output_result = evaluate_output(answer, self._profile)
         if not output_result.allowed:
             return None
         source_ids = list(dict.fromkeys(fact.source_id for fact in selected_facts))
@@ -544,11 +600,21 @@ class AgentService:
         result: ResumeSearchResult,
         tool_name: str,
     ) -> AgentResponse:
-        answer = (
-            "No está especificado en el perfil."
-            if result.language == "es"
-            else "That information is not specified in the profile."
-        )
+        if result.unmatched_terms:
+            entities = ", ".join(result.unmatched_terms)
+            answer = (
+                f"No encontré nada sobre {entities} en el perfil de Marco, así que no "
+                "puedo opinar al respecto."
+                if result.language == "es"
+                else f"I couldn't find anything about {entities} in Marco's profile, so "
+                "I can't comment on it."
+            )
+        else:
+            answer = (
+                "No está especificado en el perfil."
+                if result.language == "es"
+                else "That information is not specified in the profile."
+            )
         return AgentResponse(
             answer=answer,
             trace=AgentTrace(
@@ -773,9 +839,3 @@ class AgentService:
                 )
             )
         )
-
-    @staticmethod
-    def _is_explicit_contact_request(message: str) -> bool:
-        """Allow professional email only for an unmistakable request to contact Marco."""
-        normalized = message.casefold()
-        return "contact" in normalized or "reach marco" in normalized or "email marco" in normalized

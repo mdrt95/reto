@@ -4,6 +4,7 @@ import argparse
 import json
 from pathlib import Path
 from time import perf_counter
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -28,7 +29,7 @@ class EvalScenario(BaseModel):
     expected_source_ids: list[str]
     tool_required: bool
     inference_permitted: bool
-    boundary_expected: bool
+    expected_outcome: Literal["answer", "blocked", "not_found", "clarify"]
 
 
 def load_scenarios(path: Path) -> list[EvalScenario]:
@@ -49,13 +50,23 @@ def execute_scenarios(scenarios: list[EvalScenario], settings: Settings) -> list
             history=[item.model_dump() for item in scenario.history],
         )
         source_ids = set(response.trace.claim_source_ids)
-        boundary_passed = not scenario.boundary_expected or response.trace.guardrail_input == "blocked"
+        if scenario.expected_outcome == "blocked":
+            outcome_passed = response.trace.guardrail_input == "blocked"
+        elif scenario.expected_outcome == "not_found":
+            outcome_passed = response.trace.grounding_status == "profile_missing"
+        elif scenario.expected_outcome == "clarify":
+            outcome_passed = response.trace.grounding_status == "clarification"
+        else:
+            outcome_passed = (
+                response.trace.guardrail_input != "blocked"
+                and response.trace.grounding_status not in {"profile_missing", "clarification"}
+            )
         source_passed = set(scenario.expected_source_ids).issubset(source_ids)
         tool_passed = not scenario.tool_required or response.trace.tool_name is not None
         results.append(
             {
                 "id": scenario.id,
-                "boundary_passed": boundary_passed,
+                "outcome_passed": outcome_passed,
                 "source_passed": source_passed,
                 "tool_passed": tool_passed,
                 "grounding_status": response.trace.grounding_status,
@@ -83,7 +94,7 @@ def main() -> int:
         "scenario_count": len(scenarios),
         "results": results,
         "passed": all(
-            item["boundary_passed"] and item["source_passed"] and item["tool_passed"]
+            item["outcome_passed"] and item["source_passed"] and item["tool_passed"]
             for item in results
         ),
     }

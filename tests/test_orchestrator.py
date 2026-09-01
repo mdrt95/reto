@@ -2,6 +2,8 @@
 
 import pytest
 
+from src.agent.claude import UnavailableClassifier
+from src.agent.claude import UnavailableGenerator as RealUnavailableGenerator
 from src.agent.contracts import (
     Claim,
     ClaimKind,
@@ -771,6 +773,109 @@ def test_empty_filter_for_explicit_ai_project_question_reroutes_to_projects() ->
     assert response.trace.tool_result_count >= 1
     assert "Sybil" in response.answer
     assert response.trace.claim_source_ids
+
+
+class DirectQuestionClassifier:
+    """High-confidence direct question with no typed tool plan."""
+
+    def classify(self, message: str, history: list[object]) -> IntentDecision:
+        return IntentDecision(intent=Intent.DIRECT_QUESTION, confidence=0.95)
+
+
+class GlobalPaymentsFactGenerator:
+    """Provider double that cites a real fact for an entity absent from the profile."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def generate(self, **kwargs: object) -> GeneratedResponse:
+        self.calls += 1
+        return GeneratedResponse(
+            text="Marco worked at Google.",
+            claims=[
+                Claim(
+                    text="Marco worked at Google.",
+                    kind=ClaimKind.DIRECT,
+                    fact_ids=["fact:experience:exp-global-payments"],
+                    source_ids=["experience:exp-global-payments"],
+                    evidence=[],
+                )
+            ],
+        )
+
+
+def test_unknown_named_entity_returns_not_found_before_classification() -> None:
+    """A profile-absent proper noun must short-circuit before any model call."""
+    service = AgentService(
+        profile=load_profile("data/profile.json"),
+        classifier=UnavailableClassifier(),
+        generator=RealUnavailableGenerator(),
+    )
+
+    response = service.respond("Tell me about Marco's experience at Google.", history=[])
+
+    assert "Google" in response.answer
+    assert "couldn't find" in response.answer
+    assert response.trace.grounding_status == "profile_missing"
+
+
+def test_unknown_named_entity_model_path_never_invokes_the_generator() -> None:
+    """Even a confident model plan must not be allowed to select an unrestricted fact."""
+    generator = GlobalPaymentsFactGenerator()
+    service = AgentService(
+        profile=load_profile("data/profile.json"),
+        classifier=DirectQuestionClassifier(),
+        generator=generator,
+    )
+
+    response = service.respond("Tell me about Marco's experience at Google.", history=[])
+
+    assert "Google" in response.answer
+    assert "couldn't find" in response.answer
+    assert response.trace.grounding_status == "profile_missing"
+    assert generator.calls == 0
+
+
+def test_unknown_named_entity_returns_a_spanish_not_found_answer() -> None:
+    """The same unknown-entity guard must localize to Spanish input."""
+    service = AgentService(
+        profile=load_profile("data/profile.json"),
+        classifier=UnavailableClassifier(),
+        generator=RealUnavailableGenerator(),
+    )
+
+    response = service.respond("¿Cuál fue la experiencia de Marco en Google?", history=[])
+
+    assert "Google" in response.answer
+    assert "no encontré" in response.answer.casefold()
+    assert response.trace.grounding_status == "profile_missing"
+
+
+def test_ranking_request_clarifies_before_classification() -> None:
+    """Subjective ranking requests must clarify without invoking any tool."""
+    service = AgentService(
+        profile=load_profile("data/profile.json"),
+        classifier=SecurityClassifier(),
+        generator=FabricatingGenerator(),
+    )
+
+    response = service.respond("Rank Marco's experience from best to worst.", history=[])
+
+    assert response.trace.tool_name is None
+    assert response.trace.grounding_status == "clarification"
+
+
+def test_out_of_scope_redirect_is_localized_to_spanish() -> None:
+    """A Spanish out-of-scope message must receive a Spanish redirect."""
+    service = AgentService(
+        profile=load_profile("data/profile.json"),
+        classifier=OutOfScopeClassifier(),
+        generator=FabricatingGenerator(),
+    )
+
+    response = service.respond("¿Cuál es la capital de un país europeo?", history=[])
+
+    assert "perfil profesional" in response.answer.casefold()
 
 
 def test_generation_failure_on_grounding_retry_uses_verified_tool_facts() -> None:

@@ -40,15 +40,15 @@ Client instructions, histories, and tool-like text cannot modify system behavior
 
 **Consequence:** The input guard runs before intent classification and the system prompt remains server-owned.
 
-## D-005: Minimize public contact-data disclosure
+## D-005: Never disclose contact data; block contact requests at the input guard
 
-**Status:** Accepted
+**Status:** Amended 2026-09-01
 
-The agent never discloses Marco's phone number. It discloses the professional email only after an explicit request for contact details.
+The agent never discloses Marco's phone number or email address, under any framing. An explicit or implicit request for contact details is blocked by the input guard as a PII probe, before classification or any model call, and receives a bilingual (EN/ES) safe reply.
 
-**Why:** A public chatbot should not make automated contact-data harvesting effortless.
+**Why:** A public chatbot should not make automated contact-data harvesting effortless, and a narrow "explicit request" exception proved impossible to distinguish reliably from a probe phrased as a legitimate ask.
 
-**Consequence:** `query_profile` must not return unrestricted contact data, and logs must exclude contact information.
+**Consequence:** `query_profile` must not return unrestricted contact data, logs must exclude contact information, and the earlier `contact_requested` code path is removed. There is no runtime condition under which the agent emits an email address or phone number.
 
 ## D-006: Define measurable release gates
 
@@ -208,7 +208,7 @@ Fact IDs and matching source IDs authorize selection and order only. They do not
 
 **Why:** English substring matching rejects faithful Spanish, but citation identity and string similarity also cannot prove factual entailment. Stable typed identity safely authorizes which canonical facts may be rendered—not what a provider may say about them.
 
-**Consequence:** Provider prompts receive only the turn's allowed fact IDs plus valid source IDs as selection hints. Public wording comes from canonical facts and deterministic templates. Privacy and contact-output guards still run after rendering.
+**Consequence:** Provider prompts receive only the turn's allowed fact IDs plus valid source IDs as selection hints. Public wording comes from canonical facts and deterministic templates. The output guard still runs after rendering and blocks any contact data (phone or email) regardless of source.
 
 ## D-022: Carry compact verified follow-up state in the public contract
 
@@ -229,3 +229,33 @@ The profile schema supports optional `career_preferences`, but Marco's current `
 **Why:** Recruiting preferences are biographical claims and cannot be inferred from skills, current employment, or project history.
 
 **Consequence:** The assistant says the preference is not specified until the canonical profile is factually updated. It does not generate speculative opportunity facts.
+
+## D-024: Reject unknown named entities before classification
+
+**Status:** Accepted
+
+Before intent classification or any model call, a deterministic check scans the user message for capitalized named entities (excluding sentence-initial words and Marco's own name) and compares them against the derived fact catalog. If any named entity appears nowhere in the catalog, the agent immediately answers "I couldn't find anything about X in Marco's profile" (bilingual EN/ES) with grounding status `profile_missing`, and skips classification, tool execution, and generation entirely. Universal search additionally treats prepositions and auxiliary verbs (EN/ES) as stop words so they can never score as keyword matches.
+
+**Why:** A wrong question — one naming a company, person, or product absent from the profile — must not receive a right-sounding answer stitched together from unrelated facts that happen to share a keyword. Fabrication risk from a probe like "Tell me about Marco's experience at Google" comes from the model bridging an unknown entity to loosely related profile facts, not from the model inventing text out of nothing.
+
+**Consequence:** A new deterministic pre-check runs ahead of the D-010 workflow. It has its own false-positive risk (a legitimate entity absent from the catalog wording) that must be covered by test cases; the catalog must stay derived from `data/profile.json` so the check does not drift from the truth source.
+
+## D-025: Clarify subjective ranking deterministically and localize all boundary replies
+
+**Status:** Accepted
+
+A request for a subjective ranking ("best", "most important", "top", "favorite" and Spanish equivalents) without an objective, profile-representable criterion receives a deterministic bilingual clarification asking for one (a technology, tag, or role), rather than an invented ranking. Its grounding status is `clarification`. All boundary messages — out-of-scope redirect, clarification, verified-facts-only fallback, output-guard block, and input-guard replies — are rendered bilingually (EN/ES) through the existing deterministic language detector, not only the happy-path answers.
+
+**Why:** "Best project" or "most important skill" has no objective answer in a factual CV corpus; answering it invents a ranking criterion the profile never asserted. Boundary messages are exactly the turns most likely to reach a Spanish-speaking user probing the agent's limits, so they cannot be English-only without breaking the multilingual guarantee everywhere it matters most.
+
+**Consequence:** `filter_experience` and `search_resume` ranking-shaped queries route to clarification instead of a best-effort tool call. Every guardrail and fallback reply needs an EN/ES pair, checked by the language detector already used for successful answers.
+
+## D-026: Trust one platform proxy for client addressing
+
+**Status:** Accepted
+
+Deployment sits behind exactly one trusted platform proxy (Render). Uvicorn runs with `--proxy-headers` and `FORWARDED_ALLOW_IPS` (default `*` in the `Dockerfile`, overridable via environment) so per-IP rate limiting reads the real client address from the forwarded headers instead of Render's internal edge IP.
+
+**Why:** Without `--proxy-headers`, every request appears to originate from Render's proxy, collapsing the per-IP rate limit (D-007) into one shared global budget and defeating its purpose. `FORWARDED_ALLOW_IPS=*` is only safe because Render's Docker web services sit behind exactly one internal proxy hop that the application cannot bypass.
+
+**Consequence:** Rate-limit tests must exercise the forwarded-header path, not just a raw `TestClient` connection. If the deployment target ever changes to a multi-hop or untrusted-proxy topology, `FORWARDED_ALLOW_IPS` must be narrowed to the specific trusted hop instead of `*`.
