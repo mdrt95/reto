@@ -169,3 +169,13 @@ Tests cover the profile loader, each typed tool's representative match/no-match 
 **Why:** Small focused tests protect the highest-risk contracts while keeping the project proportionate to a demo challenge.
 
 **Consequence:** New behavior needs a test only when it creates a new boundary, failure mode, or regression risk. Do not grow a giant test suite merely to increase test count.
+
+## D-018: Enforce the focused offline checks through GitHub Actions
+
+**Status:** Accepted
+
+Run the existing pytest suite, source compilation, and fixed evaluation-scenario validation on every push and pull request using Python 3.12. The workflow has read-only repository permissions and never receives an Anthropic API key.
+
+**Why:** The project needs an independent, repeatable control that prevents basic regressions from reaching the shared repository, without paying for model calls or expanding the test surface.
+
+**Consequence:** Live model evaluation remains an explicit, credentialed release step. CI failure blocks confidence in a change; a green CI run does not substitute for the production smoke test or live evaluation gate.
