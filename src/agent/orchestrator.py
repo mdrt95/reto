@@ -40,6 +40,7 @@ from src.tools.profile_tools import (
     detect_response_language,
     fact_display_text,
     find_unknown_entities,
+    normalize_resume_text,
     query_profile,
     search_projects,
     search_resume,
@@ -207,7 +208,7 @@ class AgentService:
                 trace=AgentTrace(grounding_status="profile_missing"),
             )
 
-        follow_up = self._follow_up_plan(message, state)
+        follow_up = self._follow_up_plan(message, state, history)
         if follow_up == "clarify":
             language = detect_response_language(message)
             answer = (
@@ -520,9 +521,15 @@ class AgentService:
                 if project_result.matches:
                     return "search_projects", project_result
             filter_by = decision.filter_by if decision.filter_by in {"technology", "tag", "role"} else "tag"
+            filter_value = decision.filter_value
+            if not has_filter_plan:
+                tag_override = self._profile_tag_match(message)
+                if tag_override is not None:
+                    filter_by = "tag"
+                    filter_value = tag_override
             result = filter_experience(
                 self._profile,
-                FilterExperienceArguments(filter_by=filter_by, value=decision.filter_value or "profile"),
+                FilterExperienceArguments(filter_by=filter_by, value=filter_value or "profile"),
             )
             if not result.matches and self._is_explicit_project_question(message):
                 return "search_projects", self._search_projects_with_fallback(
@@ -536,6 +543,12 @@ class AgentService:
                 message,
             )
         if decision.intent is Intent.SUMMARY_REQUEST:
+            tag_override = self._profile_tag_match(message)
+            if tag_override is not None:
+                return "filter_experience", filter_experience(
+                    self._profile,
+                    FilterExperienceArguments(filter_by="tag", value=tag_override),
+                )
             field_override = self._summary_field_override(message)
             if field_override is not None:
                 return "query_profile", query_profile(
@@ -554,6 +567,14 @@ class AgentService:
             and self._is_employment_history_question(message)
         ):
             profile_field = "companies"
+        if (
+            decision.intent in {Intent.DIRECT_QUESTION, Intent.FOLLOW_UP}
+            and profile_field in (None, "skills")
+            and self._mentions_project_or_experience_technology(message)
+        ):
+            technology_result = self._technology_search_result(message)
+            if technology_result is not None:
+                return "search_resume", technology_result
         if decision.intent in {Intent.DIRECT_QUESTION, Intent.FOLLOW_UP} and profile_field in {
             "skills",
             "languages",
@@ -566,6 +587,57 @@ class AgentService:
                 QueryProfileArguments(field=profile_field),
             )
         return None, None
+
+    def _mentions_project_or_experience_technology(self, message: str) -> bool:
+        """True when the message names a technology or tag cataloged under a project or job.
+
+        Built entirely from `build_resume_fact_catalog` (D-020) — no hardcoded technology
+        list — so a question naming one specific technology (e.g. "FAISS") is recognized
+        without special-casing it, keeping the heuristic profile-derived and bounded.
+        """
+        catalog = build_resume_fact_catalog(self._profile)
+        technology_tokens: set[str] = set()
+        for fact in catalog:
+            if fact.topic not in ("projects", "experience"):
+                continue
+            for keyword in fact.keywords:
+                technology_tokens.update(normalize_resume_text(keyword).split())
+        message_tokens = set(normalize_resume_text(message).split())
+        return bool(technology_tokens & message_tokens)
+
+    def _technology_search_result(self, message: str) -> ResumeSearchResult | None:
+        """Search facts for one named technology, preferring the profile's own topic guess.
+
+        Falls back to the project and experience domains explicitly (D-032) because the
+        generic topic detector in `search_resume` can pick an unrelated topic — e.g. one
+        matching the verb "worked" — before ever inspecting the technology token itself.
+        """
+        for topic in (None, "projects", "experience"):
+            result = search_resume(self._profile, SearchResumeArguments(query=message, topic=topic))
+            if result.matches:
+                return result
+        return None
+
+    def _profile_tag_match(self, message: str) -> str | None:
+        """Return the first profile-defined experience highlight tag named in the message.
+
+        Built directly from `experience[].highlights[].tags` — not the mixed
+        technology/tag keyword bag — so a generic word never masquerades as a tag (D-032).
+        """
+        normalized_message = normalize_resume_text(message)
+        message_tokens = set(normalized_message.split())
+        for experience in self._profile.experience:
+            for highlight in experience.highlights:
+                for tag in highlight.tags:
+                    normalized_tag = normalize_resume_text(tag)
+                    if not normalized_tag:
+                        continue
+                    if " " in normalized_tag:
+                        if normalized_tag in normalized_message:
+                            return tag
+                    elif normalized_tag in message_tokens:
+                        return tag
+        return None
 
     def _tool_fallback_response(
         self,
@@ -1033,6 +1105,7 @@ class AgentService:
         self,
         message: str,
         state: ConversationState | None,
+        history: list[object] | None = None,
     ) -> SearchResumeArguments | Literal["clarify"] | None:
         normalized = " ".join(message.casefold().split())
         is_work_pivot = "en tu trabajo" in normalized or "at work" in normalized
@@ -1041,15 +1114,23 @@ class AgentService:
             for phrase in (
                 "con qué lo construiste", "con que lo construiste", "tell me more about that one",
                 "what else", "qué más", "que mas", "y en tu trabajo", "and at work",
+                "for that", "on that", "that one", "in that",
+                "con eso", "en ese", "para eso", "de eso",
             )
         )
         if not is_follow_up:
             return None
         if is_work_pivot:
             return SearchResumeArguments(query=message, topic="experience")
-        if state is None or not state.last_topic:
-            return "clarify"
-        if len(state.last_entities) != 1 or not state.last_source_ids:
+        if (
+            state is None
+            or not state.last_topic
+            or len(state.last_entities) != 1
+            or not state.last_source_ids
+        ):
+            history_plan = self._history_entity_plan(message, history or [])
+            if history_plan is not None:
+                return history_plan
             return "clarify"
         source_roots = list(
             dict.fromkeys(source_id.split(".highlight:", 1)[0] for source_id in state.last_source_ids)
@@ -1075,6 +1156,51 @@ class AgentService:
             topic=state.last_topic,
             source_ids=source_roots,
         )
+
+    _HISTORY_TECHNOLOGY_MARKERS = (
+        "technolog", "tecnolog", "stack", "built with", "con que",
+    )
+
+    def _history_entity_plan(
+        self,
+        message: str,
+        history: list[object],
+    ) -> SearchResumeArguments | None:
+        """Resolve a follow-up referent ("that") from the last few history turns.
+
+        Only an unambiguous, single, profile-known entity mentioned recently may be
+        used — zero or multiple candidates fail closed to the caller's "clarify".
+        """
+        if not history:
+            return None
+        catalog = build_resume_fact_catalog(self._profile)
+        name_tokens = {
+            normalize_resume_text(part) for part in self._profile.personal.name.split() if part
+        }
+        entity_topic: dict[str, tuple[str, ResumeTopic]] = {}
+        for fact in catalog:
+            if not fact.entity:
+                continue
+            key = normalize_resume_text(fact.entity)
+            if not key or key in name_tokens:
+                continue
+            entity_topic.setdefault(key, (fact.entity, fact.topic))
+        found: dict[str, tuple[str, ResumeTopic]] = {}
+        for item in history[-4:]:
+            content = item.get("content") if isinstance(item, dict) else getattr(item, "content", None)
+            if not content:
+                continue
+            normalized_content = normalize_resume_text(str(content))
+            for key, (entity, topic) in entity_topic.items():
+                if re.search(rf"\b{re.escape(key)}\b", normalized_content):
+                    found[key] = (entity, topic)
+        if len(found) != 1:
+            return None
+        entity, topic = next(iter(found.values()))
+        normalized_message = normalize_resume_text(message)
+        if any(marker in normalized_message for marker in self._HISTORY_TECHNOLOGY_MARKERS):
+            return SearchResumeArguments(query=entity, topic=topic)
+        return SearchResumeArguments(query=f"{entity} {message}", topic=None)
 
     def _bounded_intent_fallback(self, message: str) -> IntentDecision | None:
         """Recover only unmistakable profile intents after local classifier JSON failure."""

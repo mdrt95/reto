@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import re
 from pathlib import Path
 from time import perf_counter
 from typing import Literal
@@ -32,6 +33,22 @@ class EvalScenario(BaseModel):
     expected_outcome: Literal["answer", "blocked", "not_found", "clarify"]
     required_tokens: list[str] = Field(default_factory=list)
     forbidden_tokens: list[str] = Field(default_factory=list)
+
+
+_TOKEN_PATTERN_CACHE: dict[str, re.Pattern[str]] = {}
+
+
+def token_present(token: str, text: str) -> bool:
+    """Check a required/forbidden eval token as a whole word or phrase, case-insensitively.
+
+    A plain substring check (the prior behavior) false-positives on a token that is a
+    prefix of an unrelated longer word (e.g. forbidden "led" inside "scheduled").
+    """
+    pattern = _TOKEN_PATTERN_CACHE.get(token)
+    if pattern is None:
+        pattern = re.compile(rf"\b{re.escape(token)}\b", re.IGNORECASE)
+        _TOKEN_PATTERN_CACHE[token] = pattern
+    return pattern.search(text) is not None
 
 
 def load_scenarios(path: Path) -> list[EvalScenario]:
@@ -65,11 +82,10 @@ def execute_scenarios(scenarios: list[EvalScenario], settings: Settings) -> list
             )
         source_passed = set(scenario.expected_source_ids).issubset(source_ids)
         tool_passed = not scenario.tool_required or response.trace.tool_name is not None
-        answer_casefold = response.answer.casefold()
         tokens_passed = all(
-            token.casefold() in answer_casefold for token in scenario.required_tokens
+            token_present(token, response.answer) for token in scenario.required_tokens
         ) and all(
-            token.casefold() not in answer_casefold for token in scenario.forbidden_tokens
+            not token_present(token, response.answer) for token in scenario.forbidden_tokens
         )
         results.append(
             {

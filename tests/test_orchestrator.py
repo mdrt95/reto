@@ -1372,6 +1372,84 @@ def test_security_tag_filter_shape_still_uses_filter_experience() -> None:
     assert response.trace.tool_name == "filter_experience"
 
 
+class FaissSkillsClassifier:
+    """Model-shaped direct question about one named technology, filed under skills."""
+
+    def classify(self, message: str, history: list[object]) -> IntentDecision:
+        return IntentDecision(
+            intent=Intent.DIRECT_QUESTION,
+            confidence=0.95,
+            profile_field="skills",
+        )
+
+
+def test_specific_technology_question_routes_to_fact_search_not_skills_list() -> None:
+    """Naming one technology must return the facts that mention it (D-032), not the skills list."""
+    service = AgentService(
+        profile=load_profile("data/profile.json"),
+        classifier=FaissSkillsClassifier(),
+        generator=RealUnavailableGenerator(),
+    )
+
+    response = service.respond("Has Marco worked with FAISS?", history=[])
+
+    assert response.trace.tool_name == "search_resume"
+    assert "project:proj-sybil.highlight:sybil-hl-hybrid" in response.trace.claim_source_ids
+
+
+def test_history_follow_up_resolves_entity_named_in_recent_history() -> None:
+    """"That" in a follow-up must resolve to the entity named in recent history (D-032)."""
+    service = AgentService(
+        profile=load_profile("data/profile.json"),
+        classifier=FaissSkillsClassifier(),
+        generator=RealUnavailableGenerator(),
+    )
+
+    response = service.respond(
+        "What technologies did you use for that?",
+        history=[{"role": "user", "content": "Tell me about Sybil."}],
+    )
+
+    assert response.trace.tool_name == "search_resume"
+    assert response.trace.claim_source_ids
+    assert all(
+        source_id.startswith("project:proj-sybil") for source_id in response.trace.claim_source_ids
+    )
+    assert "FAISS" in response.answer
+
+
+class SecuritySummaryClassifier:
+    """Model-shaped summary request that still names an explicit profile tag."""
+
+    def classify(self, message: str, history: list[object]) -> IntentDecision:
+        return IntentDecision(
+            intent=Intent.SUMMARY_REQUEST,
+            confidence=0.9,
+            audience="recruiter",
+        )
+
+
+def test_summary_request_naming_a_profile_tag_routes_to_filter_experience() -> None:
+    """An explicit tag word must override a summary intent (D-032), not the whole narrative."""
+    profile = load_profile("data/profile.json")
+    security_matches = filter_experience(
+        profile, FilterExperienceArguments(filter_by="tag", value="security")
+    )
+    service = AgentService(
+        profile=profile,
+        classifier=SecuritySummaryClassifier(),
+        generator=RealUnavailableGenerator(),
+    )
+
+    response = service.respond(
+        "Tell me about Marco's security work in your own words.", history=[]
+    )
+
+    assert response.trace.tool_name == "filter_experience"
+    assert response.trace.claim_source_ids == [match.source_id for match in security_matches.matches]
+    assert "senior engineer" not in response.answer.casefold()
+
+
 def test_summary_fallback_uses_spanish_narrative_for_spanish_request() -> None:
     """The summary fallback body (D-031) must render the plan's own narrative text."""
     profile = load_profile("data/profile.json")
