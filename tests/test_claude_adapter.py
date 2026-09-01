@@ -1,5 +1,6 @@
 """Focused tests for the Anthropic adapter's privacy and parsing boundaries."""
 
+import json
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -142,3 +143,45 @@ def test_provider_failure_is_not_mislabeled_as_local_validation_failure() -> Non
         classifier.classify("Summarize Marco’s experience.", [])
 
     assert not isinstance(captured.value, InvalidStructuredOutputError)
+
+
+def test_generation_caches_a_prefix_no_turn_content_can_change() -> None:
+    """One per-turn byte in the cached prefix would silently stop caching for all traffic."""
+    client = MagicMock()
+    client.messages.create.return_value = SimpleNamespace(
+        content=[
+            SimpleNamespace(
+                text=(
+                    '{"text":"Global Payments (EVO Payments México)","claims":['
+                    '{"text":"Global Payments (EVO Payments México)","kind":"direct",'
+                    '"source_ids":["experience:exp-global-payments"],'
+                    '"evidence":["Global Payments (EVO Payments México)"]}]}'
+                )
+            )
+        ]
+    )
+    generator = ClaudeResponseGenerator(
+        client=client,
+        settings=Settings(environment="test", anthropic_api_key="test-key"),
+    )
+    profile = load_profile("data/profile.json")
+
+    generator.generate(
+        message="Where has Marco worked?",
+        history=[],
+        profile=profile,
+        tool_result=None,
+        allowed_source_ids={"experience:exp-global-payments"},
+    )
+    generator.generate(
+        message="What languages does Marco speak?",
+        history=[{"role": "user", "content": "an earlier turn"}],
+        profile=profile,
+        tool_result=None,
+        allowed_source_ids={"personal"},
+    )
+
+    first, second = (call.kwargs["system"] for call in client.messages.create.call_args_list)
+    assert first == second
+    assert first[-1]["cache_control"] == {"type": "ephemeral"}
+    assert "Where has Marco worked?" not in json.dumps(first)

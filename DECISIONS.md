@@ -259,3 +259,13 @@ Deployment sits behind exactly one trusted platform proxy (Render). Uvicorn runs
 **Why:** Without `--proxy-headers`, every request appears to originate from Render's proxy, collapsing the per-IP rate limit (D-007) into one shared global budget and defeating its purpose. `FORWARDED_ALLOW_IPS=*` is only safe because Render's Docker web services sit behind exactly one internal proxy hop that the application cannot bypass.
 
 **Consequence:** Rate-limit tests must exercise the forwarded-header path, not just a raw `TestClient` connection. If the deployment target ever changes to a multi-hop or untrusted-proxy topology, `FORWARDED_ALLOW_IPS` must be narrowed to the specific trusted hop instead of `*`.
+
+## D-027: Cache the turn-independent generation prefix at the provider
+
+**Status:** Accepted
+
+Answer generation sends its stable content — the behavioral instruction, the contact-stripped profile payload, the output schema, and the grounding rules — as `system` text blocks, with one `cache_control: {"type": "ephemeral"}` breakpoint on the last of them. Only per-turn content (`user_message`, `history`, `tool_result`, `allowed_source_ids`, `allowed_fact_ids`) stays in the user message. The prefix is serialized with `sort_keys=True` so its bytes never depend on dictionary ordering. Intent classification stays uncached.
+
+**Why:** That prefix was previously embedded in the same JSON blob as the user message, so it was re-billed at full input price on every call despite being byte-identical across every user and every turn. Cache reads cost roughly a tenth of base input price, and the prefix measures about 1,736 tokens — above the 1,024-token minimum cacheable prefix for `claude-sonnet-4-6`, so entries are actually created. The classifier's stable prefix is a few hundred tokens, below that minimum, where a breakpoint would create no entry and read nothing back. Moving the profile into `system` also strengthens D-004: trusted server data and operator instructions now sit in the operator channel, ahead of the untrusted user turn.
+
+**Consequence:** The cached prefix must stay free of per-turn bytes; a single request-scoped value placed before the breakpoint would silently drop the hit rate to zero with no error, so a test asserts the prefix is identical across turns. Any future edit to the profile payload, output schema, or rules invalidates every entry once and re-warms on the next request, which is acceptable because those change only on deploy. The default five-minute TTL is correct while requests keep arriving; each read refreshes the entry at no extra cost. Confirming the cache actually fires in production requires reading `response.usage.cache_read_input_tokens`, which the adapter does not yet capture.
