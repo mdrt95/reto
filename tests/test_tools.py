@@ -73,3 +73,24 @@ def test_summary_tool_returns_verified_sources_without_generating_copy() -> None
 
     assert result.audience == "technical"
     assert "project:proj-sybil" in result.source_ids
+
+
+def test_recruiter_summary_plan_selects_deterministic_fact_ids() -> None:
+    """Recruiter fact_ids must open with the base experience fact and stay within budget."""
+    profile = load_profile("data/profile.json")
+
+    result = summarize_profile(profile, SummarizeProfileArguments(audience="recruiter"))
+
+    assert result.fact_ids[0] == "fact:experience:exp-global-payments"
+    assert len(result.fact_ids) <= 8
+    assert "fact:education:edu-itcm-ict" in result.fact_ids
+
+
+def test_technical_summary_plan_includes_project_facts() -> None:
+    """Technical fact_ids must include the base project fact within budget."""
+    profile = load_profile("data/profile.json")
+
+    result = summarize_profile(profile, SummarizeProfileArguments(audience="technical"))
+
+    assert "fact:project:proj-sybil" in result.fact_ids
+    assert len(result.fact_ids) <= 8

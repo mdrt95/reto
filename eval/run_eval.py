@@ -30,6 +30,8 @@ class EvalScenario(BaseModel):
     tool_required: bool
     inference_permitted: bool
     expected_outcome: Literal["answer", "blocked", "not_found", "clarify"]
+    required_tokens: list[str] = Field(default_factory=list)
+    forbidden_tokens: list[str] = Field(default_factory=list)
 
 
 def load_scenarios(path: Path) -> list[EvalScenario]:
@@ -63,12 +65,19 @@ def execute_scenarios(scenarios: list[EvalScenario], settings: Settings) -> list
             )
         source_passed = set(scenario.expected_source_ids).issubset(source_ids)
         tool_passed = not scenario.tool_required or response.trace.tool_name is not None
+        answer_casefold = response.answer.casefold()
+        tokens_passed = all(
+            token.casefold() in answer_casefold for token in scenario.required_tokens
+        ) and all(
+            token.casefold() not in answer_casefold for token in scenario.forbidden_tokens
+        )
         results.append(
             {
                 "id": scenario.id,
                 "outcome_passed": outcome_passed,
                 "source_passed": source_passed,
                 "tool_passed": tool_passed,
+                "tokens_passed": tokens_passed,
                 "grounding_status": response.trace.grounding_status,
                 "latency_ms": round((perf_counter() - started_at) * 1_000),
             }
@@ -94,7 +103,10 @@ def main() -> int:
         "scenario_count": len(scenarios),
         "results": results,
         "passed": all(
-            item["outcome_passed"] and item["source_passed"] and item["tool_passed"]
+            item["outcome_passed"]
+            and item["source_passed"]
+            and item["tool_passed"]
+            and item["tokens_passed"]
             for item in results
         ),
     }

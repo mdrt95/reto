@@ -40,6 +40,7 @@ Comparison requests compose relevant read-only results. Ranking is refused unles
 - The verifier returns `fully_grounded`, `partially_grounded`, or `not_grounded`, claim counts, unsupported claim summaries, and claim-to-source IDs. This metadata is internal by default.
 - Deterministic matching decides normal cases. Model-assisted semantic review may explain a disputed match but cannot approve unsupported information.
 - When no tool selected facts, no fact ID is authorized; the model cannot self-select facts.
+- A model rephrase of the turn's selected facts is deliverable only after it passes the deterministic containment gate (`verify_rephrase`, D-029), which rejects escalation vocabulary, out-of-selection vocabulary, and verb-meaning drift; any rejection or provider outage falls back to the canonical bilingual narrative rendering.
 
 ## Guardrails and memory
 

@@ -17,10 +17,17 @@ from src.agent.orchestrator import AgentService
 from src.models.profile import load_profile
 from src.tools.profile_tools import (
     ExperienceFilterResult,
+    FilterExperienceArguments,
     ProfileQueryResult,
     ProfileSummaryPlan,
     ProjectSearchResult,
+    ResumeFact,
     ResumeSearchResult,
+    SummarizeProfileArguments,
+    build_resume_fact_catalog,
+    fact_display_text,
+    filter_experience,
+    summarize_profile,
 )
 
 
@@ -33,6 +40,18 @@ class SecurityClassifier:
             confidence=0.98,
             filter_by="tag",
             filter_value="security",
+        )
+
+
+class AIFilterClassifier:
+    """Model-shaped FILTER_REQUEST for a technology that also matches a project (residual 2)."""
+
+    def classify(self, message: str, history: list[object]) -> IntentDecision:
+        return IntentDecision(
+            intent=Intent.FILTER_REQUEST,
+            confidence=0.9,
+            filter_by="technology",
+            filter_value="AI",
         )
 
 
@@ -169,6 +188,17 @@ class SkillsClassifier:
             intent=Intent.DIRECT_QUESTION,
             confidence=0.95,
             profile_field="skills",
+        )
+
+
+class EducationClassifier:
+    """Typed profile projection targeting the education field."""
+
+    def classify(self, message: str, history: list[object]) -> IntentDecision:
+        return IntentDecision(
+            intent=Intent.DIRECT_QUESTION,
+            confidence=0.95,
+            profile_field="education",
         )
 
 
@@ -321,6 +351,10 @@ def test_filter_request_falls_back_to_verified_tool_facts() -> None:
 
     assert response.trace.tool_name == "filter_experience"
     assert response.trace.grounding_status == "not_grounded"
+    assert response.answer.startswith(
+        "I couldn't compose a written answer right now, so here are the verified "
+        "profile facts instead:"
+    )
     assert "Built an internal Security Console" in response.answer
     assert "Google" not in response.answer
     assert "experience:exp-global-payments.highlight:hl-security-console" in (
@@ -409,18 +443,21 @@ def test_out_of_scope_intent_is_redirected_without_generation() -> None:
 
 def test_employer_question_routes_and_falls_back_to_exact_profile_values() -> None:
     """Common work-history wording must survive an incomplete model tool plan."""
+    generator = FabricatingGenerator()
     service = AgentService(
         profile=load_profile("data/profile.json"),
         classifier=EmployerClassifierWithoutProfileField(),
-        generator=FabricatingGenerator(),
+        generator=generator,
     )
 
     response = service.respond("Where has Marco worked so far?", history=[])
 
-    assert response.answer == "Global Payments (EVO Payments México)"
+    assert response.answer == "Employers from the profile:\n- Global Payments (EVO Payments México)"
     assert response.trace.tool_name == "query_profile"
     assert response.trace.tool_result_count == 1
+    assert response.trace.grounding_status == "list_rendered"
     assert response.trace.claim_source_ids == ["experience:exp-global-payments"]
+    assert generator.calls == 0
 
 
 @pytest.mark.parametrize(
@@ -429,7 +466,6 @@ def test_employer_question_routes_and_falls_back_to_exact_profile_values() -> No
         ("What security-related work has Marco done?", "filter_experience"),
         ("Summarize Marco’s experience.", "summarize_profile"),
         ("Which projects used AI or data platforms?", "search_projects"),
-        ("Where has Marco worked so far?", "query_profile"),
     ],
 )
 def test_frontend_and_custom_questions_complete_offline(
@@ -451,6 +487,22 @@ def test_frontend_and_custom_questions_complete_offline(
     assert response.trace.claim_source_ids
 
 
+def test_frontend_employer_question_is_rendered_deterministically() -> None:
+    """The employer-history scenario now short-circuits to deterministic list rendering."""
+    service = AgentService(
+        profile=load_profile("data/profile.json"),
+        classifier=FrontendScenarioClassifier(),
+        generator=ToolGroundedGenerator(),
+    )
+
+    response = service.respond("Where has Marco worked so far?", history=[])
+
+    assert response.answer
+    assert response.trace.tool_name == "query_profile"
+    assert response.trace.grounding_status == "list_rendered"
+    assert response.trace.claim_source_ids
+
+
 def test_summary_uses_exact_tool_facts_when_generation_is_unavailable() -> None:
     """A source-selected summary must not become 503 solely due to invalid model JSON."""
     service = AgentService(
@@ -463,9 +515,30 @@ def test_summary_uses_exact_tool_facts_when_generation_is_unavailable() -> None:
 
     assert response.trace.tool_name == "summarize_profile"
     assert response.trace.grounding_status == "tool_fallback"
+    assert response.answer.startswith(
+        "I couldn't compose a written answer right now, so here are the verified "
+        "profile facts instead:"
+    )
     assert "Jr. .NET Developer (Full-Stack)" in response.answer
     assert "Global Payments (EVO Payments México)" in response.answer
+    assert response.trace.tool_result_count > 0
     assert response.trace.claim_source_ids
+
+
+def test_summary_fallback_notice_is_localized_to_spanish() -> None:
+    """The bilingual fallback notice must localize to a Spanish request."""
+    service = AgentService(
+        profile=load_profile("data/profile.json"),
+        classifier=SummaryClassifier(),
+        generator=UnavailableGenerator(),
+    )
+
+    response = service.respond("Resume la experiencia de Marco.", history=[])
+
+    assert response.answer.startswith(
+        "No pude redactar una respuesta en este momento, así que estos son los "
+        "datos verificados del perfil:"
+    )
 
 
 def test_broad_ai_data_project_query_falls_back_to_sourceable_keyword_matches() -> None:
@@ -878,6 +951,21 @@ def test_out_of_scope_redirect_is_localized_to_spanish() -> None:
     assert "perfil profesional" in response.answer.casefold()
 
 
+def test_summary_request_with_skills_marker_routes_to_query_profile() -> None:
+    """A Spanish skills question misclassified as summary must still answer with skills."""
+    profile = load_profile("data/profile.json")
+    service = AgentService(
+        profile=profile,
+        classifier=SummaryClassifier(),
+        generator=ToolGroundedGenerator(),
+    )
+
+    response = service.respond("Está bien, platícame sobre sus habilidades", history=[])
+
+    assert response.trace.tool_name == "query_profile"
+    assert profile.skills.programming_languages[0] in response.answer
+
+
 def test_generation_failure_on_grounding_retry_uses_verified_tool_facts() -> None:
     """A locally invalid second generation must not leak a 503 when tool facts exist."""
     generator = FailsOnGroundingRetryGenerator()
@@ -893,3 +981,409 @@ def test_generation_failure_on_grounding_retry_uses_verified_tool_facts() -> Non
     assert response.trace.grounding_status == "tool_fallback"
     assert "Built an internal Security Console" in response.answer
     assert response.trace.claim_source_ids
+
+
+class _FixedTextRephraser:
+    """Test double returning a fixed rephrase and recording every call it received."""
+
+    def __init__(self, text: str) -> None:
+        self._text = text
+        self.calls: list[dict[str, object]] = []
+
+    def rephrase(self, *, message: str, facts: list[ResumeFact], language: str) -> str:
+        self.calls.append({"message": message, "facts": facts, "language": language})
+        return self._text
+
+
+class _UnavailableRephraser:
+    """Test double simulating a provider outage during rephrase."""
+
+    def rephrase(self, **_: object) -> str:
+        raise GenerationUnavailableError("rephraser unavailable")
+
+
+@pytest.mark.parametrize(
+    "message",
+    ["What is your experience?"],
+)
+def test_escalating_rephrase_is_rejected_and_falls_back_to_canonical_rendering(message: str) -> None:
+    """With a rephraser configured, the generator is skipped (D-030); the gate still governs delivery."""
+    profile = load_profile("data/profile.json")
+
+    rejected = AgentService(
+        profile=profile,
+        classifier=IncompleteClassifier(),
+        generator=ContradictoryFactIdGenerator(),
+        rephraser=_FixedTextRephraser("Marco led the team that built this."),
+    ).respond(message, history=[])
+
+    assert "led the team" not in rejected.answer
+    assert "Global Payments" in rejected.answer
+    assert rejected.trace.grounding_status == "fact_rendered"
+    assert rejected.trace.rephrase_outcome == "rejected:escalation"
+    assert rejected.trace.generator_skipped is True
+
+
+def test_faithful_rephrase_is_accepted_and_delivered(message: str = "What is your experience?") -> None:
+    """With a rephraser configured, all six tool-selected experience facts are the selection (D-030)."""
+    profile = load_profile("data/profile.json")
+    experience_facts = [fact for fact in build_resume_fact_catalog(profile) if fact.topic == "experience"]
+    faithful_rephrase = " ".join(fact.narrative_en for fact in experience_facts if fact.narrative_en)
+
+    accepted = AgentService(
+        profile=profile,
+        classifier=IncompleteClassifier(),
+        generator=ContradictoryFactIdGenerator(),
+        rephraser=_FixedTextRephraser(faithful_rephrase),
+    ).respond(message, history=[])
+
+    assert accepted.answer == faithful_rephrase
+    assert accepted.trace.grounding_status == "rephrased"
+    assert accepted.trace.rephrase_outcome == "accepted"
+    assert accepted.trace.generator_skipped is True
+
+
+def test_rephraser_outage_falls_back_to_canonical_rendering(
+    message: str = "What is your experience?",
+) -> None:
+    profile = load_profile("data/profile.json")
+
+    fallback = AgentService(
+        profile=profile,
+        classifier=IncompleteClassifier(),
+        generator=ContradictoryFactIdGenerator(),
+        rephraser=_UnavailableRephraser(),
+    ).respond(message, history=[])
+
+    assert "Global Payments" in fallback.answer
+    assert fallback.trace.grounding_status == "fact_rendered"
+    assert fallback.trace.rephrase_outcome == "rephraser_unavailable"
+    assert fallback.trace.generator_skipped is True
+
+
+def test_no_rephraser_leaves_rephrase_outcome_none(
+    message: str = "What is your experience?",
+) -> None:
+    profile = load_profile("data/profile.json")
+
+    response = AgentService(
+        profile=profile,
+        classifier=IncompleteClassifier(),
+        generator=ContradictoryFactIdGenerator(),
+    ).respond(message, history=[])
+
+    assert response.trace.rephrase_outcome is None
+    assert response.trace.grounding_status == "fact_rendered"
+
+
+class TruncatedGenerator:
+    """Generator double simulating a max_tokens truncation on every attempt."""
+
+    def generate(self, **_: object) -> GeneratedResponse:
+        raise InvalidStructuredOutputError("Answer generator output was truncated")
+
+
+def test_summary_generator_truncation_is_recorded_as_fallback_reason() -> None:
+    """A truncated generator output must surface a specific, logged fallback reason."""
+    service = AgentService(
+        profile=load_profile("data/profile.json"),
+        classifier=SummaryClassifier(),
+        generator=TruncatedGenerator(),
+    )
+
+    response = service.respond("Summarize Marco's experience.", history=[])
+
+    assert response.trace.grounding_status == "tool_fallback"
+    assert response.trace.fallback_reason == "generator_truncated"
+
+
+def test_summary_generator_unavailable_is_recorded_as_fallback_reason() -> None:
+    """A hard generation outage (not an invalid-output error) gets its own reason code."""
+    service = AgentService(
+        profile=load_profile("data/profile.json"),
+        classifier=SummaryClassifier(),
+        generator=UnavailableGenerator(),
+    )
+
+    response = service.respond("Summarize Marco's experience.", history=[])
+
+    assert response.trace.grounding_status == "tool_fallback"
+    assert response.trace.fallback_reason == "generator_unavailable"
+
+
+def test_classifier_provider_outage_is_recorded_as_fallback_reason() -> None:
+    """A classifier-stage outage must be distinguishable from a generator-stage one."""
+    service = AgentService(
+        profile=load_profile("data/profile.json"),
+        classifier=ProviderUnavailableClassifier(),
+        generator=ToolGroundedGenerator(),
+    )
+
+    response = service.respond("What security-related work has Marco done?", history=[])
+
+    assert response.trace.grounding_status == "fully_grounded"
+    assert response.trace.fallback_reason == "classifier_unavailable"
+
+
+def test_classifier_invalid_output_is_recorded_as_fallback_reason() -> None:
+    """A classifier structured-output validation failure gets its own reason code."""
+    service = AgentService(
+        profile=load_profile("data/profile.json"),
+        classifier=InvalidStructuredClassifier(),
+        generator=ToolGroundedGenerator(),
+    )
+
+    response = service.respond("What security-related work has Marco done?", history=[])
+
+    assert response.trace.fallback_reason == "classifier_invalid_output"
+
+
+def test_skills_query_in_spanish_is_rendered_deterministically_without_generation() -> None:
+    """A ProfileQueryResult for skills must never reach the generator or rephraser."""
+    profile = load_profile("data/profile.json")
+    generator = FabricatingGenerator()
+    service = AgentService(
+        profile=profile,
+        classifier=SkillsClassifier(),
+        generator=generator,
+        rephraser=_FixedTextRephraser("should never be used"),
+    )
+
+    response = service.respond("Cuáles son las habilidades de Marco?", history=[])
+
+    assert generator.calls == 0
+    assert response.trace.grounding_status == "list_rendered"
+    assert response.answer.startswith("Lenguajes y habilidades del perfil:")
+    assert "Lenguajes de programación:" in response.answer
+    assert profile.skills.programming_languages[0] in response.answer
+
+
+def test_education_query_in_english_renders_the_education_narrative() -> None:
+    """A ProfileQueryResult for education must use the bilingual narrative when present."""
+    profile = load_profile("data/profile.json")
+    generator = FabricatingGenerator()
+    service = AgentService(
+        profile=profile,
+        classifier=EducationClassifier(),
+        generator=generator,
+    )
+
+    response = service.respond("What is Marco's education?", history=[])
+
+    assert generator.calls == 0
+    assert response.trace.grounding_status == "list_rendered"
+    assert response.answer.startswith("Education from the profile:")
+    assert profile.education[0].narrative is not None
+    assert profile.education[0].narrative.en in response.answer
+
+
+def test_filter_experience_small_fact_set_skips_generator_with_faithful_rephrase() -> None:
+    """A tool result with <= 8 selected facts must bypass the generator entirely."""
+    profile = load_profile("data/profile.json")
+    generator = FabricatingGenerator()
+    result = filter_experience(profile, FilterExperienceArguments(filter_by="tag", value="security"))
+    rephrase_text = " ".join(match.summary for match in result.matches)
+    service = AgentService(
+        profile=profile,
+        classifier=SecurityClassifier(),
+        generator=generator,
+        rephraser=_FixedTextRephraser(rephrase_text),
+    )
+
+    response = service.respond("What security-related work has Marco done?", history=[])
+
+    assert generator.calls == 0
+    assert response.trace.grounding_status == "rephrased"
+    assert response.trace.generator_skipped is True
+    assert response.trace.rephrase_outcome == "accepted"
+
+
+def test_filter_experience_small_fact_set_rejects_escalating_rephrase() -> None:
+    """A gate rejection while the generator is skipped must fall back to canonical rendering."""
+    generator = FabricatingGenerator()
+    service = AgentService(
+        profile=load_profile("data/profile.json"),
+        classifier=SecurityClassifier(),
+        generator=generator,
+        rephraser=_FixedTextRephraser("Marco led the team that built this."),
+    )
+
+    response = service.respond("What security-related work has Marco done?", history=[])
+
+    assert generator.calls == 0
+    assert response.trace.grounding_status == "fact_rendered"
+    assert response.trace.generator_skipped is True
+    assert response.trace.rephrase_outcome == "rejected:escalation"
+
+
+class _RaisingGenerator:
+    """Generator double that fails the test if invoked at all."""
+
+    def generate(self, **_: object) -> GeneratedResponse:
+        raise AssertionError("generator must not be called for a deterministic summary fact set")
+
+
+def test_summary_plan_skips_the_generator_when_rephraser_is_configured() -> None:
+    """ProfileSummaryPlan.fact_ids (D-031) is now deterministic and small enough to skip generation."""
+    profile = load_profile("data/profile.json")
+    plan = summarize_profile(profile, SummarizeProfileArguments(audience="recruiter"))
+    catalog = {fact.fact_id: fact for fact in build_resume_fact_catalog(profile)}
+    rephrase_text = " ".join(
+        fact_display_text(catalog[fact_id], "en") for fact_id in plan.fact_ids if fact_id in catalog
+    )
+    service = AgentService(
+        profile=profile,
+        classifier=SummaryClassifier(),
+        generator=_RaisingGenerator(),
+        rephraser=_FixedTextRephraser(rephrase_text),
+    )
+
+    response = service.respond("Summarize Marco's experience.", history=[])
+
+    assert response.trace.grounding_status == "rephrased"
+    assert response.trace.generator_skipped is True
+
+
+def test_no_rephraser_configured_still_calls_the_generator_for_small_fact_sets() -> None:
+    """Without a rephraser wired, the generator-skip optimization must not activate."""
+    generator = FabricatingGenerator()
+    service = AgentService(
+        profile=load_profile("data/profile.json"),
+        classifier=SecurityClassifier(),
+        generator=generator,
+    )
+
+    service.respond("What security-related work has Marco done?", history=[])
+
+    assert generator.calls >= 1
+
+
+class _InvalidOutputRephraser:
+    """Test double simulating a locally-invalid rephrase response."""
+
+    def rephrase(self, **_: object) -> str:
+        raise InvalidStructuredOutputError("invalid structured output")
+
+
+class _TruncatedRephraser:
+    """Test double simulating a max_tokens truncated rephrase response."""
+
+    def rephrase(self, **_: object) -> str:
+        raise InvalidStructuredOutputError("Rephraser output was truncated")
+
+
+def test_rephraser_invalid_output_is_recorded_with_a_specific_reason_code(
+    message: str = "What is your experience?",
+) -> None:
+    profile = load_profile("data/profile.json")
+
+    fallback = AgentService(
+        profile=profile,
+        classifier=IncompleteClassifier(),
+        generator=ContradictoryFactIdGenerator(),
+        rephraser=_InvalidOutputRephraser(),
+    ).respond(message, history=[])
+
+    assert fallback.trace.grounding_status == "fact_rendered"
+    assert fallback.trace.rephrase_outcome == "rephraser_invalid_output"
+
+
+def test_rephraser_truncated_output_is_recorded_with_a_specific_reason_code(
+    message: str = "What is your experience?",
+) -> None:
+    profile = load_profile("data/profile.json")
+
+    fallback = AgentService(
+        profile=profile,
+        classifier=IncompleteClassifier(),
+        generator=ContradictoryFactIdGenerator(),
+        rephraser=_TruncatedRephraser(),
+    ).respond(message, history=[])
+
+    assert fallback.trace.grounding_status == "fact_rendered"
+    assert fallback.trace.rephrase_outcome == "rephraser_truncated"
+
+
+def test_security_filter_selects_only_matched_highlight_facts_not_parent() -> None:
+    """A highlight match must not pull in its parent experience fact (residual 1)."""
+    profile = load_profile("data/profile.json")
+    result = filter_experience(profile, FilterExperienceArguments(filter_by="tag", value="security"))
+    rephrase_text = " ".join(match.summary for match in result.matches)
+    rephraser = _FixedTextRephraser(rephrase_text)
+    service = AgentService(
+        profile=profile,
+        classifier=SecurityClassifier(),
+        generator=FabricatingGenerator(),
+        rephraser=rephraser,
+    )
+
+    response = service.respond("What security-related work has Marco done?", history=[])
+
+    assert response.trace.rephrase_outcome == "accepted"
+    assert len(rephraser.calls) == 1
+    selected_source_ids = {fact.source_id for fact in rephraser.calls[0]["facts"]}
+    assert selected_source_ids == {match.source_id for match in result.matches}
+    assert "experience:exp-global-payments" not in selected_source_ids
+
+
+def test_security_filter_canonical_rendering_excludes_job_description() -> None:
+    """Canonical fallback rendering for a highlight match must not open with team_context."""
+    profile = load_profile("data/profile.json")
+    service = AgentService(
+        profile=profile,
+        classifier=SecurityClassifier(),
+        generator=FabricatingGenerator(),
+        rephraser=_FixedTextRephraser("Marco led the team that built this."),
+    )
+
+    response = service.respond("What security-related work has Marco done?", history=[])
+
+    assert response.trace.grounding_status == "fact_rendered"
+    assert profile.experience[0].team_context not in response.answer
+
+
+def test_ai_technology_filter_reroutes_to_project_search() -> None:
+    """An explicit project question must prefer search_projects over an employment fact (residual 2)."""
+    service = AgentService(
+        profile=load_profile("data/profile.json"),
+        classifier=AIFilterClassifier(),
+        generator=ToolGroundedGenerator(),
+    )
+
+    response = service.respond("Which projects used AI?", history=[])
+
+    assert response.trace.tool_name == "search_projects"
+    assert response.trace.claim_source_ids
+    assert all(
+        source_id.startswith("project:proj-sybil") for source_id in response.trace.claim_source_ids
+    )
+
+
+def test_security_tag_filter_shape_still_uses_filter_experience() -> None:
+    """The same FILTER_REQUEST shape without project wording must stay on filter_experience."""
+    service = AgentService(
+        profile=load_profile("data/profile.json"),
+        classifier=SecurityClassifier(),
+        generator=ToolGroundedGenerator(),
+    )
+
+    response = service.respond("What security-related work has Marco done?", history=[])
+
+    assert response.trace.tool_name == "filter_experience"
+
+
+def test_summary_fallback_uses_spanish_narrative_for_spanish_request() -> None:
+    """The summary fallback body (D-031) must render the plan's own narrative text."""
+    profile = load_profile("data/profile.json")
+    plan = summarize_profile(profile, SummarizeProfileArguments(audience="recruiter"))
+    catalog = {fact.fact_id: fact for fact in build_resume_fact_catalog(profile)}
+    expected_narrative = fact_display_text(catalog[plan.fact_ids[0]], "es")
+    service = AgentService(
+        profile=profile,
+        classifier=SummaryClassifier(),
+        generator=UnavailableGenerator(),
+    )
+
+    response = service.respond("Resume la experiencia de Marco", history=[])
+
+    assert expected_narrative in response.answer

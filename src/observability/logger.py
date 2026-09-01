@@ -21,6 +21,9 @@ class TurnLogEvent(BaseModel):
     guardrail_input: str
     guardrail_output: str
     grounding_status: str | None = None
+    rephrase_outcome: str | None = None
+    fallback_reason: str | None = None
+    generator_skipped: bool = False
     claim_source_count: int = 0
     latency_total_ms: int
     latency_intent_ms: int | None = None

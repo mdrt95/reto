@@ -111,3 +111,38 @@ def test_unknown_entity_check_handles_case_dots_and_title_case(message: str, exp
     profile = load_profile("data/profile.json")
 
     assert find_unknown_entities(profile, message) == expected
+
+
+def test_spanish_search_result_renders_the_spanish_narrative_for_a_highlight() -> None:
+    """A Spanish resume search must render a highlight's Spanish narrative, not raw text."""
+    from src.agent.claude import UnavailableClassifier, UnavailableGenerator
+    from src.agent.orchestrator import AgentService
+
+    profile = load_profile("data/profile.json")
+    service = AgentService(
+        profile=profile,
+        classifier=UnavailableClassifier(),
+        generator=UnavailableGenerator(),
+    )
+
+    response = service.respond("¿Qué proyectos has construido?", history=[])
+
+    first_highlight = profile.projects[0].highlights[0]
+    assert first_highlight.narrative is not None
+    assert first_highlight.narrative.es in response.answer
+
+
+@pytest.mark.parametrize(
+    ("message", "expected"),
+    [
+        ("Está bien, platícame sobre sus habilidades", "es"),
+        ("Cuéntame sobre sus proyectos", "es"),
+        ("What are Marco's skills?", "en"),
+        ("Tell me about the stack", "en"),
+    ],
+)
+def test_language_detection_recognizes_common_spanish_request_words(message: str, expected: str) -> None:
+    """Spanish requests phrased without question words must still get Spanish rendering."""
+    from src.tools.profile_tools import detect_response_language
+
+    assert detect_response_language(message) == expected

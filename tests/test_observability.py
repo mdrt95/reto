@@ -26,3 +26,23 @@ def test_turn_event_serializes_operational_metadata_without_content_fields() -> 
     assert "message" not in payload
     assert "answer" not in payload
     assert "email" not in payload
+
+
+def test_turn_event_serializes_fallback_reason_without_content_fields() -> None:
+    """A logged fallback reason must stay content-free (a code, not the raw error)."""
+    event = TurnLogEvent(
+        request_id="req_124",
+        conversation_id="conv_124",
+        outcome_code="completed",
+        guardrail_input="pass",
+        guardrail_output="pass",
+        grounding_status="tool_fallback",
+        fallback_reason="generator_truncated",
+        latency_total_ms=10,
+    )
+
+    payload = json.loads(event.model_dump_json())
+
+    assert payload["fallback_reason"] == "generator_truncated"
+    assert "message" not in payload
+    assert "answer" not in payload

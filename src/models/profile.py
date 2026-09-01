@@ -52,6 +52,13 @@ class Skills(ProfileModel):
     devops_engineering: list[str] = Field(default_factory=list)
 
 
+class Narrative(ProfileModel):
+    """Human-reviewed bilingual prose restating a fact's existing text only."""
+
+    en: str = Field(min_length=1)
+    es: str = Field(min_length=1)
+
+
 class ExperienceHighlight(ProfileModel):
     """A stable, sourceable outcome from a professional experience."""
 
@@ -60,6 +67,7 @@ class ExperienceHighlight(ProfileModel):
     detail: str
     technologies: list[str] = Field(default_factory=list)
     tags: list[str] = Field(default_factory=list)
+    narrative: Narrative | None = None
 
 
 class Experience(ProfileModel):
@@ -73,6 +81,7 @@ class Experience(ProfileModel):
     current: bool
     team_context: str
     highlights: list[ExperienceHighlight]
+    narrative: Narrative | None = None
 
 
 class ProjectHighlight(ProfileModel):
@@ -83,6 +92,7 @@ class ProjectHighlight(ProfileModel):
     detail: str
     technologies: list[str] = Field(default_factory=list)
     tags: list[str] = Field(default_factory=list)
+    narrative: Narrative | None = None
 
 
 class Project(ProfileModel):
@@ -94,6 +104,7 @@ class Project(ProfileModel):
     status: str
     technologies: list[str] = Field(default_factory=list)
     highlights: list[ProjectHighlight]
+    narrative: Narrative | None = None
 
 
 class Education(ProfileModel):
@@ -104,6 +115,7 @@ class Education(ProfileModel):
     institution: str
     start_year: int
     end_year: int
+    narrative: Narrative | None = None
 
 
 class CareerPreferences(ProfileModel):

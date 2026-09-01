@@ -79,3 +79,42 @@ def test_career_preferences_are_optional_and_not_invented() -> None:
     profile = load_profile("data/profile.json")
 
     assert profile.career_preferences is None
+
+
+def test_narrative_is_optional_and_loads_when_present() -> None:
+    """Bilingual narratives are optional and must load with the highlight that owns them."""
+    profile = load_profile("data/profile.json")
+
+    highlight = profile.experience[0].highlights[1]
+    assert highlight.id == "hl-security-console"
+    assert highlight.narrative is not None
+    assert highlight.narrative.en
+    assert highlight.narrative.es
+
+    project = profile.projects[0]
+    assert project.narrative is not None
+    education = profile.education[0]
+    assert education.narrative is not None
+    experience = profile.experience[0]
+    assert experience.narrative is not None
+
+
+def test_narrative_defaults_to_none_when_absent() -> None:
+    profile = Profile.model_validate(
+        {
+            "meta": {"schema_version": "1.0", "last_updated": "2026-08-31"},
+            "personal": {
+                "name": "Test User",
+                "title": "Engineer",
+                "location": "Mexico City",
+                "email": "test@example.com",
+                "languages": [],
+            },
+            "skills": {},
+            "experience": [],
+            "projects": [],
+            "education": [],
+        }
+    )
+
+    assert profile.experience == []

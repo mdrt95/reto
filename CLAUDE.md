@@ -138,6 +138,7 @@ A `src/protocol/` adapter directory is added only after an external-interoperabi
 - Every factual claim must be classifiable as: **Grounded** (explicit in profile), **Inferred** (reasonable conclusion from profile data), or **Unknown** (not in profile).
 - The agent must transparently say "that's not in my profile" rather than fabricate.
 - Every grounded or inferred claim must retain stable profile IDs in its verification metadata. Regenerate once on an ungrounded claim, then fall back to verified facts only.
+- A model rephrase of selected facts is deliverable only when it passes the deterministic containment gate (D-029); any failure or provider outage falls back to the canonical bilingual narrative rendering.
 - A question naming an entity absent from the profile receives an explicit not-found answer before any model call; unrelated verified facts are never substituted.
 
 ### Trust and Runtime Boundaries

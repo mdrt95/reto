@@ -84,6 +84,9 @@ class AgentTrace(BaseModel):
     tool_result_count: int = 0
     grounding_status: str | None = None
     claim_source_ids: list[str] = Field(default_factory=list)
+    rephrase_outcome: str | None = None
+    fallback_reason: str | None = None
+    generator_skipped: bool = False
 
 
 StateValue = Annotated[str, Field(min_length=1, max_length=200)]

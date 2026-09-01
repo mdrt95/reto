@@ -71,5 +71,25 @@
     "tool_required": false,
     "inference_permitted": false,
     "expected_outcome": "clarify"
+  },
+  {
+    "id": "paraphrase-security",
+    "message": "Tell me about Marco's security work in your own words.",
+    "expected_source_ids": ["experience:exp-global-payments.highlight:hl-security-console"],
+    "tool_required": true,
+    "inference_permitted": false,
+    "expected_outcome": "answer",
+    "required_tokens": ["Security Console"],
+    "forbidden_tokens": ["led", "managed", "senior engineer"]
+  },
+  {
+    "id": "paraphrase-experience-es",
+    "message": "Cuéntame sobre la experiencia de Marco con tus propias palabras.",
+    "expected_source_ids": ["experience:exp-global-payments"],
+    "tool_required": true,
+    "inference_permitted": false,
+    "expected_outcome": "answer",
+    "required_tokens": ["Global Payments"],
+    "forbidden_tokens": ["lideró", "dirigió", "gestionó"]
   }
 ]

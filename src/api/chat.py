@@ -1,5 +1,7 @@
 """First-party public HTTP contract for the bounded CV-agent service."""
 
+import json
+import logging
 from collections import defaultdict, deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -152,6 +154,9 @@ def chat(payload: ChatRequest, request: Request) -> ChatResponse:
         else:
             result = responder.respond(payload.message, history=history, state=payload.state)
     except GenerationUnavailableError as error:
+        logging.getLogger("banorte_cv_agent.generation").warning(
+            json.dumps({"event": "generation_unavailable", "request_id": request_id, "error_type": type(error).__name__})
+        )
         raise PublicProblem(
             status=503,
             code="generation_unavailable",
@@ -172,6 +177,9 @@ def chat(payload: ChatRequest, request: Request) -> ChatResponse:
             guardrail_input=result.trace.guardrail_input,
             guardrail_output=result.trace.guardrail_output,
             grounding_status=result.trace.grounding_status,
+            rephrase_outcome=result.trace.rephrase_outcome,
+            fallback_reason=result.trace.fallback_reason,
+            generator_skipped=result.trace.generator_skipped,
             claim_source_count=len(set(result.trace.claim_source_ids)),
             latency_total_ms=round((monotonic() - started_at) * 1_000),
             model_name=settings.model_name,

@@ -68,7 +68,7 @@ A successful response contains opaque request and conversation IDs, the grounded
 
 ### Answer style
 
-Fact-backed answers are rendered deterministically from canonical profile facts as concise lists; the model classifies intent and selects facts, it does not author the delivered prose. This is a deliberate grounding trade-off: it trades some conversational polish for text that can always be traced back to a stable profile fact ID.
+Fact-backed answers render human-reviewed bilingual narratives from canonical profile facts as concise lists; the model classifies intent and selects facts. A model rephrase of those same selected facts is delivered instead only when it passes a deterministic containment gate (`src/agent/rephrase.py`, see DECISIONS.md D-029) that blocks role/seniority inflation and any vocabulary outside the selected facts; any gate failure or provider outage falls back to the canonical rendering. This is a deliberate grounding trade-off: it trades some conversational polish for text that can always be traced back to a stable profile fact ID.
 
 ### `GET /health`
 

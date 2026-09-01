@@ -30,6 +30,14 @@ class ResumeFact(BaseModel):
     text: str
     entity: str | None = None
     keywords: list[str] = Field(default_factory=list)
+    narrative_en: str | None = None
+    narrative_es: str | None = None
+
+
+def fact_display_text(fact: "ResumeFact", language: Literal["en", "es"]) -> str:
+    """Return the human-reviewed bilingual narrative when present, else the raw fact text."""
+    narrative = fact.narrative_en if language == "en" else fact.narrative_es
+    return narrative if narrative else fact.text
 
 
 class SearchResumeArguments(BaseModel):
@@ -114,6 +122,7 @@ class ProfileSummaryPlan(BaseModel):
 
     audience: str
     source_ids: list[str]
+    fact_ids: list[str] = Field(default_factory=list)
 
 
 class SummarizeProfileArguments(BaseModel):
@@ -186,6 +195,8 @@ def detect_response_language(text: str) -> Literal["en", "es"]:
         "cual", "que", "como", "con", "construiste", "experiencia", "proyecto",
         "puesto", "tecnologia", "tu", "y",
         "de", "la", "el", "los", "las", "del", "en", "es",
+        "sobre", "sus", "su", "platicame", "cuentame", "hablame", "habilidades",
+        "cuales", "esta", "bien", "sobre", "dime", "quiero", "saber",
     }
     return "es" if set(normalized.split()) & spanish_markers else "en"
 
@@ -256,6 +267,8 @@ def build_resume_fact_catalog(profile: Profile) -> list[ResumeFact]:
                 text=f"{experience.role} at {experience.company}. {experience.team_context}",
                 entity=experience.company,
                 keywords=[experience.role, experience.company, "current" if experience.current else "past"],
+                narrative_en=experience.narrative.en if experience.narrative else None,
+                narrative_es=experience.narrative.es if experience.narrative else None,
             )
         )
         facts.append(
@@ -278,6 +291,8 @@ def build_resume_fact_catalog(profile: Profile) -> list[ResumeFact]:
                     text=f"{highlight.summary} {highlight.detail}".strip(),
                     entity=experience.company,
                     keywords=[*highlight.technologies, *highlight.tags, experience.role],
+                    narrative_en=highlight.narrative.en if highlight.narrative else None,
+                    narrative_es=highlight.narrative.es if highlight.narrative else None,
                 )
             )
     for project in profile.projects:
@@ -290,6 +305,8 @@ def build_resume_fact_catalog(profile: Profile) -> list[ResumeFact]:
                 text=f"{project.name}: {project.subtitle}",
                 entity=project.name,
                 keywords=[*project.technologies, project.status],
+                narrative_en=project.narrative.en if project.narrative else None,
+                narrative_es=project.narrative.es if project.narrative else None,
             )
         )
         for highlight in project.highlights:
@@ -302,6 +319,8 @@ def build_resume_fact_catalog(profile: Profile) -> list[ResumeFact]:
                     text=f"{highlight.summary} {highlight.detail}".strip(),
                     entity=project.name,
                     keywords=[*project.technologies, *highlight.technologies, *highlight.tags],
+                    narrative_en=highlight.narrative.en if highlight.narrative else None,
+                    narrative_es=highlight.narrative.es if highlight.narrative else None,
                 )
             )
     for education in profile.education:
@@ -313,6 +332,8 @@ def build_resume_fact_catalog(profile: Profile) -> list[ResumeFact]:
                 topic="education",
                 text=f"{education.degree} — {education.institution} ({education.start_year}–{education.end_year})",
                 entity=education.institution,
+                narrative_en=education.narrative.en if education.narrative else None,
+                narrative_es=education.narrative.es if education.narrative else None,
             )
         )
     if profile.career_preferences:
@@ -354,6 +375,10 @@ def _profile_known_tokens(profile: Profile) -> set[str]:
         parts.extend(fact.keywords)
         if fact.entity:
             parts.append(fact.entity)
+        if fact.narrative_en:
+            parts.append(fact.narrative_en)
+        if fact.narrative_es:
+            parts.append(fact.narrative_es)
     tokens = set(normalize_resume_text(" ".join(parts)).split())
     # Dotted product names are also known by their pieces (asp.net -> asp, net).
     tokens.update(piece for token in list(tokens) for piece in token.split(".") if piece)
@@ -573,10 +598,51 @@ def query_profile(profile: Profile, arguments: QueryProfileArguments) -> Profile
 
 
 def summarize_profile(profile: Profile, arguments: SummarizeProfileArguments) -> ProfileSummaryPlan:
-    """Select verified source groups before prose generation for an audience."""
+    """Select verified source groups before prose generation for an audience.
+
+    `fact_ids` (D-031) is a deterministic, ordered, <= 8-entry fact selection so the
+    orchestrator can skip the generator's fact-selection call entirely for summaries,
+    the same way it already does for small tool-narrowed fact sets.
+    """
     sources = ["personal", "skills", *[f"experience:{item.id}" for item in profile.experience]]
     if arguments.audience == "technical":
         sources.extend(f"project:{item.id}" for item in profile.projects)
     elif arguments.audience == "executive":
         sources.extend(f"experience:{item.id}" for item in profile.experience if item.current)
-    return ProfileSummaryPlan(audience=arguments.audience, source_ids=list(dict.fromkeys(sources)))
+
+    fact_ids: list[str] = [f"fact:experience:{item.id}" for item in profile.experience]
+    if arguments.audience == "recruiter":
+        for experience in profile.experience:
+            fact_ids.extend(
+                f"fact:experience:{experience.id}.highlight:{highlight.id}"
+                for highlight in experience.highlights[:3]
+            )
+        fact_ids.extend(f"fact:education:{item.id}" for item in profile.education)
+    elif arguments.audience == "technical":
+        for experience in profile.experience:
+            fact_ids.extend(
+                f"fact:experience:{experience.id}.highlight:{highlight.id}"
+                for highlight in experience.highlights[:2]
+            )
+        for project in profile.projects:
+            fact_ids.append(f"fact:project:{project.id}")
+            fact_ids.extend(
+                f"fact:project:{project.id}.highlight:{highlight.id}"
+                for highlight in project.highlights[:2]
+            )
+    elif arguments.audience == "executive":
+        for experience in profile.experience:
+            if not experience.current:
+                continue
+            fact_ids.append(f"fact:experience:{experience.id}")
+            fact_ids.extend(
+                f"fact:experience:{experience.id}.highlight:{highlight.id}"
+                for highlight in experience.highlights[:2]
+            )
+        fact_ids.extend(f"fact:education:{item.id}" for item in profile.education)
+
+    return ProfileSummaryPlan(
+        audience=arguments.audience,
+        source_ids=list(dict.fromkeys(sources)),
+        fact_ids=list(dict.fromkeys(fact_ids))[:8],
+    )
