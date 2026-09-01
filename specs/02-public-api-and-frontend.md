@@ -15,11 +15,12 @@ Expose the core agent through a stable first-party HTTP contract and a minimal s
     { "role": "user", "content": "Tell me about Marco's work." },
     { "role": "assistant", "content": "..." }
   ],
-  "preferences": { "language": "en", "verbosity": "concise" }
+  "preferences": { "language": "en", "verbosity": "concise" },
+  "state": null
 }
 ```
 
-`message` is required, non-blank, and limited by `MAX_INPUT_CHARS`. `history` is optional, oldest-first, has only `user` or `assistant` roles, and is capped by `MAX_HISTORY_MESSAGES` and total character limit. `preferences` is optional and allowlisted to `language` and `verbosity`; all other fields are rejected.
+`message` is required, non-blank, and limited by `MAX_INPUT_CHARS`. `history` is optional, oldest-first, has only `user` or `assistant` roles, and is capped by `MAX_HISTORY_MESSAGES` and total character limit. `preferences` is optional and allowlisted to `language` and `verbosity`. `state` is an optional client-carried object with verified topic/source/entity/tool/language fields; all other fields are rejected.
 
 ### Success response
 
@@ -28,7 +29,14 @@ Expose the core agent through a stable first-party HTTP contract and a minimal s
   "id": "req_<uuid>",
   "answer": "...",
   "conversation_id": "conv_<uuid>",
-  "status": "completed"
+  "status": "completed",
+  "state": {
+    "last_topic": "projects",
+    "last_source_ids": ["project:proj-sybil"],
+    "last_entities": ["Sybil"],
+    "last_tool": "search_resume",
+    "response_language": "en"
+  }
 }
 ```
 
@@ -50,9 +58,9 @@ All errors use `application/problem+json`:
 
 | Condition | HTTP | Public code |
 |---|---:|---|
-| Request/history/preference validation failed | 422 | `invalid_request` |
+| Request/history/preference/state validation failed | 422 | `invalid_request` |
 | Request exceeds rate limit | 429 | `rate_limited` |
-| Model provider timed out or is unavailable | 503 | `generation_unavailable` |
+| Model provider is unavailable and no safe deterministic answer exists | 503 | `generation_unavailable` |
 | Unexpected failure | 500 | `internal_error` |
 
 Guardrail and out-of-scope outcomes are `200` completed answers with a safe redirect; they are not HTTP errors.
@@ -61,7 +69,7 @@ Guardrail and out-of-scope outcomes are `200` completed answers with a safe redi
 
 - Serve one responsive `frontend/index.html` from the same origin as the API.
 - Include chat bubbles, send button, loading state, suggested prompts, accessible labels, and escaped/allowlisted Markdown rendering.
-- Maintain only the bounded transcript needed to make the next request. Do not place API keys or system instructions in browser code.
+- Maintain only the bounded transcript and optional verified state needed to make the next request. Do not place API keys or system instructions in browser code.
 - Disable sending while a request is in flight; show a friendly retry action for sanitized 429/503/500 responses.
 
 ## Security and delivery

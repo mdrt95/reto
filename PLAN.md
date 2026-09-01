@@ -579,7 +579,7 @@ Every request logs a JSON record with:
 }
 ```
 
-Logs go to stdout in JSON format (compatible with Railway/Fly.io log drains).
+Logs go to stdout in JSON format (compatible with Render log drains).
 
 Use a server-generated `conversation_id` and request ID. Do not log user text, model prompts, raw provider responses, email addresses, phone numbers, or API credentials.
 
@@ -624,7 +624,7 @@ The frontend sends messages to the public response endpoint. Its wire format is 
 
 ### Target
 
-Railway (preferred) or Fly.io. Both support:
+Render (preferred) or Railway. Both support:
 - Python with `Dockerfile` or `Procfile`.
 - Public HTTPS URL.
 - Environment variables.

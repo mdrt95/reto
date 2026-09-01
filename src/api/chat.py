@@ -11,7 +11,7 @@ from fastapi import APIRouter, Request
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from src.agent.claude import GenerationUnavailableError
-from src.agent.contracts import AgentResponse
+from src.agent.contracts import AgentResponse, ConversationState
 from src.observability.logger import TurnLogEvent, log_turn
 
 
@@ -49,6 +49,7 @@ class ChatRequest(BaseModel):
     message: str = Field(min_length=1)
     history: list[HistoryItem] = Field(default_factory=list)
     preferences: Preferences | None = None
+    state: ConversationState | None = None
     model_config = ConfigDict(extra="forbid")
 
     @field_validator("message")
@@ -68,6 +69,7 @@ class ChatResponse(BaseModel):
     answer: str
     conversation_id: str
     status: Literal["completed"] = "completed"
+    state: ConversationState | None = None
 
 
 class ProblemDetails(BaseModel):
@@ -93,7 +95,13 @@ class PublicProblem(Exception):
 class ChatResponder(Protocol):
     """The narrow core-service port required by the public delivery adapter."""
 
-    def respond(self, message: str, *, history: list[object]) -> AgentResponse: ...
+    def respond(
+        self,
+        message: str,
+        *,
+        history: list[object],
+        state: ConversationState | None = None,
+    ) -> AgentResponse: ...
 
 
 @dataclass
@@ -119,7 +127,7 @@ def new_request_id() -> str:
     return f"req_{uuid4().hex}"
 
 
-@router.post("/api/chat", response_model=ChatResponse)
+@router.post("/api/chat", response_model=ChatResponse, response_model_exclude_none=True)
 def chat(payload: ChatRequest, request: Request) -> ChatResponse:
     """Validate, rate-limit, and delegate one public chat turn to the core service."""
     request_id = new_request_id()
@@ -139,7 +147,10 @@ def chat(payload: ChatRequest, request: Request) -> ChatResponse:
     started_at = monotonic()
     responder: ChatResponder = request.app.state.agent_service
     try:
-        result = responder.respond(payload.message, history=history)
+        if payload.state is None:
+            result = responder.respond(payload.message, history=history)
+        else:
+            result = responder.respond(payload.message, history=history, state=payload.state)
     except GenerationUnavailableError as error:
         raise PublicProblem(
             status=503,
@@ -170,4 +181,5 @@ def chat(payload: ChatRequest, request: Request) -> ChatResponse:
         id=request_id,
         answer=result.answer,
         conversation_id=conversation_id,
+        state=result.state,
     )

@@ -24,7 +24,7 @@ The application will first deliver a stable FastAPI-backed public chat experienc
 
 **Status:** Accepted
 
-Each generated claim must retain the profile IDs supporting it. The verifier uses deterministic matching first, permits one constrained regeneration, and then returns only verified facts.
+Each generated claim may retain selected fact IDs and profile source IDs. Those IDs authorize only canonical fact selection and ordering; they NEVER prove that provider prose semantically matches a fact. The service reconstructs fact-ID responses from canonical `ResumeFact` values. Legacy provider prose is deliverable only when a direct claim and its evidence both exactly occur in canonical source text. Generated inferred prose and uncited prose are never delivered.
 
 **Why:** Natural-language similarity alone cannot prove a professional claim is supported.
 
@@ -80,21 +80,21 @@ The FastAPI application owns HTTP delivery only. Application services orchestrat
 
 **Consequence:** Dependencies point inward. Route handlers, SDK clients, and provider payloads must not leak into domain models or tool signatures.
 
-## D-009: Use Python 3.12, FastAPI, Pydantic v2, a static frontend, and Railway first
+## D-009: Use Python 3.12, FastAPI, Pydantic v2, a static frontend, and Render first
 
 **Status:** Accepted
 
-The platform is a Python 3.12 FastAPI service with Pydantic v2 validation, a no-build static HTML/JavaScript frontend, and a Railway deployment target. The service binds to `PORT`, falling back to `8000` locally.
+The platform is a Python 3.12 FastAPI service with Pydantic v2 validation, a no-build static HTML/JavaScript frontend, and a Render Web Service deployment target. The service binds to `PORT`, falling back to `8000` locally.
 
 **Why:** The project needs a compact, type-safe API and a deployable demo rather than frontend framework complexity.
 
-**Consequence:** The runtime is stateless, configuration is environment-based, logs are JSON to stdout, and Fly.io remains a documented fallback rather than a second initial deployment target.
+**Consequence:** The runtime is stateless, configuration is environment-based, logs are JSON to stdout, and Railway remains a documented fallback rather than a second initial deployment target.
 
 ## D-010: Keep the v1 agentic workflow bounded and observable
 
 **Status:** Accepted
 
-Each turn follows: request validation → input guard → intent classification → deterministic tool plan → tool execution → answer generation → grounding verification → output guard → response/logging. A low-confidence intent asks one clarification instead of guessing.
+Each turn follows: request validation → input guard → structured intent classification when available → deterministic tool plan → tool execution → answer generation when available → grounding verification → output guard → response/logging. A low-confidence or unavailable classifier may be bypassed only when deterministic routing proves the request is resume-related; otherwise the service clarifies or fails closed.
 
 **Why:** The agent must demonstrate intentional tool use without giving an LLM unchecked control over data or execution.
 
@@ -124,7 +124,7 @@ The CV is a small, typed JSON document; v1 searches normalized fields, tags, tec
 
 **Status:** Accepted
 
-The application does not maintain a conversational database in v1. The frontend sends a bounded recent transcript on every turn; the backend uses it for that request only and retains correlation metadata, not conversation contents.
+The application does not maintain a conversational database in v1. The frontend sends a bounded recent transcript and may send compact verified state (`last_topic`, `last_source_ids`, `last_entities`, `last_tool`, and `response_language`) on every turn; the backend uses both for that request only and retains correlation metadata, not conversation contents.
 
 **Why:** The CV agent needs short follow-ups, not durable personalization. This eliminates a datastore, retention risk, and session-consistency problem.
 
@@ -148,7 +148,7 @@ Pydantic validates configuration, profile data, HTTP requests, tool arguments/re
 
 **Why:** This prevents malformed data from becoming prompts, tool input, or client-visible stack traces.
 
-**Consequence:** Validation failures are client errors; guardrail rejections are safe successful replies; upstream model and unexpected errors return retry-safe server errors with no sensitive detail.
+**Consequence:** Validation failures are client errors; guardrail rejections are safe successful replies. Upstream model failures return deterministic verified answers when selected profile facts exist, and return retry-safe server errors only when no safe answer can be produced. Unexpected failures remain sanitized.
 
 ## D-016: Make observability privacy-preserving and decision-oriented
 
@@ -179,3 +179,53 @@ Run the existing pytest suite, source compilation, and fixed evaluation-scenario
 **Why:** The project needs an independent, repeatable control that prevents basic regressions from reaching the shared repository, without paying for model calls or expanding the test surface.
 
 **Consequence:** Live model evaluation remains an explicit, credentialed release step. CI failure blocks confidence in a change; a green CI run does not substitute for the production smoke test or live evaluation gate.
+
+## D-019: Derive one universal fact catalog and index from the canonical profile
+
+**Status:** Accepted
+
+`search_resume` derives typed facts at runtime from the validated `Profile`: professional summary fields, experience, projects, skills, education, languages, and optional career preferences. Each fact has a deterministic `fact_id`, existing profile `source_id`, topic, display text, entity, and searchable keywords. Normalization removes accents and punctuation, case-folds text, and maps a bounded English/Spanish synonym set. Specialized tools remain preferred when they return a valid source-backed plan; universal search is the fallback.
+
+**Why:** Hand-maintaining a second search corpus would create competing biographical truth. Narrow phrase branches cannot provide complete multilingual recall.
+
+**Consequence:** `data/profile.json` remains the ONLY biographical truth source. Index entries and rendered factual values must be derived from model data. The index is in-memory and deterministic; it uses no embeddings, provider calls, or separately authored facts.
+
+## D-020: Make classification and generation optional optimizations
+
+**Status:** Accepted
+
+Valid specialized classifier plans win. Incomplete, low-confidence, locally invalid, authentication, transport, or provider-failure outcomes may fall back to deterministic routing only for clearly resume-related input. Out-of-scope and adversarial decisions never become profile answers. When generation is unavailable or fails grounding, typed selected facts are rendered deterministically; a 503 is reserved for turns where no safe deterministic answer or clarification exists.
+
+**Why:** Provider availability must not determine whether already-loaded verified profile facts can be answered.
+
+**Consequence:** Missing profile data receives an explicit language-aware “not specified in the profile” response. Deterministic routing is a bounded domain recognizer, not a general intent guesser.
+
+## D-021: Ground multilingual claims through selected fact/source identity
+
+**Status:** Accepted
+
+Fact IDs and matching source IDs authorize selection and order only. They do not validate, entail, or authorize arbitrary generated English or Spanish claim text. For fact-ID responses, the delivery boundary ignores provider prose and reconstructs public text from canonical selected `ResumeFact` values using bounded English/Spanish templates. The verifier does not use fuzzy similarity, semantic entailment, or a second model judge. Provider prose remains available only for direct claims through the exact existing-English evidence compatibility path; inferred provider prose is rejected because exact excerpts cannot prove a synthesis.
+
+**Why:** English substring matching rejects faithful Spanish, but citation identity and string similarity also cannot prove factual entailment. Stable typed identity safely authorizes which canonical facts may be rendered—not what a provider may say about them.
+
+**Consequence:** Provider prompts receive only the turn's allowed fact IDs plus valid source IDs as selection hints. Public wording comes from canonical facts and deterministic templates. Privacy and contact-output guards still run after rendering.
+
+## D-022: Carry compact verified follow-up state in the public contract
+
+**Status:** Accepted
+
+`POST /api/chat` accepts and returns an optional state object containing `last_topic`, `last_source_ids`, `last_entities`, `last_tool`, and `response_language`. The frontend carries it with the bounded transcript. Follow-ups resolve only through those verified references; missing state or multiple plausible entities produces clarification.
+
+**Why:** Transcript prose cannot safely reconstruct source identity, and server-side memory would add retention and consistency risk.
+
+**Consequence:** The original request and response fields remain compatible. State is client-owned, bounded, validated, ephemeral, and contains no contact data or speculative facts.
+
+## D-023: Model career preferences as optional canonical data
+
+**Status:** Accepted
+
+The profile schema supports optional `career_preferences`, but Marco's current `data/profile.json` leaves it absent because desired roles, seniority, locations, and work arrangements have not been explicitly stated. Opportunity data, if introduced later, must use a separate `opportunity:*` namespace.
+
+**Why:** Recruiting preferences are biographical claims and cannot be inferred from skills, current employment, or project history.
+
+**Consequence:** The assistant says the preference is not specified until the canonical profile is factually updated. It does not generate speculative opportunity facts.

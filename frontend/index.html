@@ -158,6 +158,7 @@
         const status = document.querySelector("#status");
         const chat = document.querySelector(".chat");
         let history = [];
+        let conversationState = null;
         let lastMessage = "";
 
         function scrollToLatest() {
@@ -303,7 +304,11 @@
             const response = await fetch("/api/chat", {
               method: "POST",
               headers: { "Content-Type": "application/json", Accept: "application/json, application/problem+json" },
-              body: JSON.stringify({ message: cleanMessage, history: boundedHistory() })
+              body: JSON.stringify({
+                message: cleanMessage,
+                history: boundedHistory(),
+                ...(conversationState ? { state: conversationState } : {})
+              })
             });
             const payload = await response.json().catch(() => ({}));
             loading.remove();
@@ -316,6 +321,7 @@
               return;
             }
             appendMessage("assistant", payload.answer, true);
+            conversationState = payload.state || null;
             history.push({ role: "user", content: cleanMessage }, { role: "assistant", content: payload.answer });
             history = boundedHistory();
           } catch (_) {

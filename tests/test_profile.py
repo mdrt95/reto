@@ -72,4 +72,10 @@ def test_invalid_profile_stops_application_startup(tmp_path: Path) -> None:
 def test_production_settings_require_an_api_key() -> None:
     """Production must fail early instead of starting with an unusable provider setup."""
     with pytest.raises(ValidationError, match="ANTHROPIC_API_KEY"):
-        Settings(environment="production")
+        Settings(environment="production", _env_file=None)
+
+
+def test_career_preferences_are_optional_and_not_invented() -> None:
+    profile = load_profile("data/profile.json")
+
+    assert profile.career_preferences is None

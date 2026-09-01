@@ -1,8 +1,17 @@
 """Typed contracts crossing agent, tool, and verification boundaries."""
 
 from enum import Enum
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field
+
+
+class GenerationUnavailableError(RuntimeError):
+    """Raised when model access or its required structured output is unavailable."""
+
+
+class InvalidStructuredOutputError(GenerationUnavailableError):
+    """Raised only when a provider response fails local structured validation."""
 
 
 class Intent(str, Enum):
@@ -41,8 +50,9 @@ class Claim(BaseModel):
 
     text: str = Field(min_length=1)
     kind: ClaimKind
+    fact_ids: list[str] = Field(default_factory=list)
     source_ids: list[str] = Field(min_length=1)
-    evidence: list[str] = Field(min_length=1)
+    evidence: list[str] = Field(default_factory=list)
 
 
 class GeneratedResponse(BaseModel):
@@ -60,6 +70,7 @@ class GroundingResult(BaseModel):
     claims_grounded: int
     unsupported_claims: list[str] = Field(default_factory=list)
     claim_sources: dict[int, list[str]] = Field(default_factory=dict)
+    claim_fact_ids: dict[int, list[str]] = Field(default_factory=dict)
 
 
 class AgentTrace(BaseModel):
@@ -75,8 +86,30 @@ class AgentTrace(BaseModel):
     claim_source_ids: list[str] = Field(default_factory=list)
 
 
+StateValue = Annotated[str, Field(min_length=1, max_length=200)]
+
+
+class ConversationState(BaseModel):
+    """Compact client-carried state containing verified referents only."""
+
+    last_topic: Literal[
+        "experience",
+        "projects",
+        "skills",
+        "education",
+        "languages",
+        "summary",
+        "career_preferences",
+    ] | None = None
+    last_source_ids: list[StateValue] = Field(default_factory=list, max_length=20)
+    last_entities: list[StateValue] = Field(default_factory=list, max_length=8)
+    last_tool: StateValue | None = None
+    response_language: Literal["en", "es"] = "en"
+
+
 class AgentResponse(BaseModel):
     """The core service result exposed through delivery adapters."""
 
     answer: str
     trace: AgentTrace
+    state: ConversationState | None = None

@@ -1,5 +1,7 @@
 """Focused tests for deterministic claim-source validation."""
 
+import pytest
+
 from src.agent.contracts import Claim, ClaimKind
 from src.agent.grounding import verify_claims
 from src.models.profile import load_profile
@@ -81,5 +83,70 @@ def test_grounding_rejects_vague_claim_supported_only_by_a_person_name() -> None
             )
         ],
     )
+
+    assert result.status == "not_grounded"
+
+
+@pytest.mark.parametrize(
+    "contradictory_text",
+    ["Marco worked at Google.", "Marco trabajó en Google."],
+)
+def test_selected_fact_id_does_not_ground_arbitrary_provider_prose(
+    contradictory_text: str,
+) -> None:
+    """Fact identity authorizes selection, never semantic provider prose."""
+    profile = load_profile("data/profile.json")
+    claim = Claim(
+        text=contradictory_text,
+        kind=ClaimKind.DIRECT,
+        fact_ids=["fact:experience:exp-global-payments"],
+        source_ids=["experience:exp-global-payments"],
+        evidence=[],
+    )
+
+    result = verify_claims(
+        profile,
+        [claim],
+        selected_fact_ids={"fact:experience:exp-global-payments"},
+    )
+
+    assert result.status == "not_grounded"
+    assert result.claim_sources == {}
+    assert result.claim_fact_ids == {0: ["fact:experience:exp-global-payments"]}
+
+
+def test_fact_id_validation_rejects_unselected_or_mismatched_sources() -> None:
+    profile = load_profile("data/profile.json")
+    claim = Claim(
+        text="Unsupported translation",
+        kind=ClaimKind.DIRECT,
+        fact_ids=["fact:project:proj-sybil.highlight:sybil-hl-rag"],
+        source_ids=["experience:exp-global-payments"],
+        evidence=[],
+    )
+
+    result = verify_claims(
+        profile,
+        [claim],
+        selected_fact_ids={"fact:project:proj-sybil.highlight:sybil-hl-rag"},
+    )
+
+    assert result.status == "not_grounded"
+
+
+def test_legacy_inference_cannot_use_exact_evidence_to_authorize_new_prose() -> None:
+    """Exact excerpts cannot prove an arbitrary synthesis without semantic judgment."""
+    profile = load_profile("data/profile.json")
+    claim = Claim(
+        text="Marco worked at Google.",
+        kind=ClaimKind.INFERRED,
+        source_ids=["experience:exp-global-payments", "project:proj-sybil"],
+        evidence=[
+            "Jr. .NET Developer (Full-Stack)",
+            "Python Retrieval-Augmented Document Q&A",
+        ],
+    )
+
+    result = verify_claims(profile, [claim])
 
     assert result.status == "not_grounded"

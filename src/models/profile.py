@@ -99,10 +99,21 @@ class Project(ProfileModel):
 class Education(ProfileModel):
     """Formal education record from the approved profile."""
 
+    id: str
     degree: str
     institution: str
     start_year: int
     end_year: int
+
+
+class CareerPreferences(ProfileModel):
+    """Optional, explicitly stated career preferences; absence is meaningful."""
+
+    desired_roles: list[str] = Field(default_factory=list)
+    seniority: str | None = None
+    locations: list[str] = Field(default_factory=list)
+    work_arrangements: list[str] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
 
 
 class Profile(ProfileModel):
@@ -114,6 +125,8 @@ class Profile(ProfileModel):
     experience: list[Experience]
     projects: list[Project]
     education: list[Education]
+    professional_summary: str | None = None
+    career_preferences: CareerPreferences | None = None
 
 
 def load_profile(profile_path: str | Path) -> Profile:

@@ -140,6 +140,7 @@
 
   "education": [
     {
+      "id": "edu-itcm-ict",
       "degree": "B.S. in ICT Engineering",
       "institution": "Instituto Tecnológico de Ciudad Madero (ITCM)",
       "start_year": 2018,

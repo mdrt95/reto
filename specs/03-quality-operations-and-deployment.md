@@ -38,7 +38,7 @@ Never emit message text, transcript, profile contact data, prompts, raw model/pr
 
 - Provide `Dockerfile`, `.env.example`, and dependency lock/configuration.
 - Run Uvicorn at `0.0.0.0:${PORT:-8000}`.
-- Configure Railway with `ANTHROPIC_API_KEY`, model/settings values, and production logging.
+- Configure Render with `ANTHROPIC_API_KEY`, model/settings values, and production logging.
 - Add `/health` to the provider health check.
 - Smoke-test the live `/health` and one safe chat request after deployment.
 

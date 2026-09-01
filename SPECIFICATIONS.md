@@ -7,7 +7,7 @@ This index is the implementation sequence. Each numbered specification is indepe
 | 00 | [Foundation and profile](specs/00-foundation-and-profile.md) | Establish the repository, runtime, validated source data, and configuration | The application can load its only runtime source of truth and answer `/health` |
 | 01 | [Core agent](specs/01-core-agent.md) | Implement bounded agent orchestration, typed tools, generation, grounding, and guards | The agent service produces verified answers without HTTP integration |
 | 02 | [Public API and frontend](specs/02-public-api-and-frontend.md) | Add the stable first-party chat contract and static user interface | A browser can safely use the deployed-contract shape locally |
-| 03 | [Quality, operations, and deployment](specs/03-quality-operations-and-deployment.md) | Add focused tests, evaluation, observability, containerization, and Railway release checks | The public demo has passed its release gates |
+| 03 | [Quality, operations, and deployment](specs/03-quality-operations-and-deployment.md) | Add focused tests, evaluation, observability, containerization, and Render release checks | The public demo has passed its release gates |
 
 ## Global invariants
 

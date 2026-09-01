@@ -53,6 +53,60 @@ def test_chat_returns_the_stable_public_contract(chat_client: TestClient) -> Non
     assert "trace" not in body
 
 
+def test_chat_accepts_and_returns_optional_conversation_state() -> None:
+    """State extension stays optional and preserves the original request contract."""
+    from src.agent.contracts import ConversationState
+
+    class StatefulAgent:
+        def respond(
+            self,
+            message: str,
+            *,
+            history: list[object],
+            state: ConversationState | None = None,
+        ) -> AgentResponse:
+            assert state is not None and state.last_topic == "projects"
+            return AgentResponse(answer="More", trace=AgentTrace(), state=state)
+
+    settings = Settings(environment="test", profile_path="data/profile.json")
+    with TestClient(create_app(settings, agent_service=StatefulAgent())) as client:
+        response = client.post(
+            "/api/chat",
+            json={
+                "message": "What else?",
+                "state": {
+                    "last_topic": "projects",
+                    "last_source_ids": ["project:proj-sybil"],
+                    "last_entities": ["Sybil"],
+                    "last_tool": "search_resume",
+                    "response_language": "en",
+                },
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["state"]["last_topic"] == "projects"
+
+
+def test_chat_rejects_oversized_conversation_state(chat_client: TestClient) -> None:
+    response = chat_client.post(
+        "/api/chat",
+        json={
+            "message": "What else?",
+            "state": {
+                "last_topic": "projects",
+                "last_source_ids": [f"project:{index}" for index in range(21)],
+                "last_entities": ["Sybil"],
+                "last_tool": "search_resume",
+                "response_language": "en",
+            },
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json()["code"] == "invalid_request"
+
+
 def test_chat_rejects_blank_message_as_problem_details(chat_client: TestClient) -> None:
     """Malformed public input must receive the documented sanitized 422 shape."""
     response = chat_client.post("/api/chat", json={"message": "   "})
