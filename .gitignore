@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Local environments and secrets
+.venv/
+.env
+
+# Generated evaluation artifacts
+eval/results.json
+
+# Operating-system files
+.DS_Store

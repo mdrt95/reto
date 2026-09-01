@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=75.8.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "banorte-cv-agent"
+version = "0.1.0"
+description = "Grounded professional-profile agent for the Reto IA Banorte challenge."
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "anthropic==0.49.0",
+    "fastapi==0.115.12",
+    "pydantic==2.10.6",
+    "pydantic-settings==2.8.1",
+    "uvicorn==0.34.0",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
