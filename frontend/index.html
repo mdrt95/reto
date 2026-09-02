@@ -1,0 +1,365 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="Ask questions about Marco Reyes' professional profile."
+    />
+    <title>Marco Reyes · CV Assistant</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --page: #09111f;
+        --surface: #101b2e;
+        --surface-raised: #16243b;
+        --border: #2a3d5c;
+        --text: #edf4ff;
+        --muted: #a8b7cf;
+        --accent: #78b6ff;
+        --accent-strong: #3d8df5;
+        --accent-ink: #041a37;
+        --user: #1b4f8f;
+        --error: #ffb4ab;
+        --error-surface: #481d24;
+        --focus: #ffe08a;
+        font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+
+      * { box-sizing: border-box; }
+      html { background: var(--page); }
+      body {
+        min-height: 100vh;
+        margin: 0;
+        background: radial-gradient(circle at 22% 0%, #162f56 0, var(--page) 35rem);
+        color: var(--text);
+        line-height: 1.55;
+      }
+      button, textarea { font: inherit; }
+      button { cursor: pointer; }
+      button:disabled { cursor: not-allowed; opacity: .62; }
+      :focus-visible { outline: 3px solid var(--focus); outline-offset: 3px; }
+
+      .app {
+        width: min(100%, 58rem);
+        min-height: 100vh;
+        margin: 0 auto;
+        padding: clamp(1rem, 3vw, 2rem);
+        display: grid;
+        grid-template-rows: auto minmax(0, 1fr) auto;
+        gap: 1rem;
+      }
+      .masthead { padding: .5rem .25rem; }
+      .eyebrow {
+        display: block;
+        color: var(--accent);
+        font-size: .78rem;
+        font-weight: 800;
+        letter-spacing: .09em;
+        text-transform: uppercase;
+      }
+      h1 { margin: .25rem 0 0; font-size: clamp(1.65rem, 4vw, 2.3rem); line-height: 1.15; }
+      .intro { max-width: 43rem; margin: .65rem 0 0; color: var(--muted); }
+
+      .chat {
+        min-height: 22rem;
+        padding: clamp(1rem, 3vw, 1.5rem);
+        overflow-y: auto;
+        border: 1px solid var(--border);
+        border-radius: 1.15rem;
+        background: color-mix(in srgb, var(--surface) 94%, transparent);
+        box-shadow: 0 1.5rem 4rem rgb(0 0 0 / .22);
+      }
+      .messages { display: grid; gap: 1rem; }
+      .message { display: grid; gap: .25rem; max-width: min(100%, 46rem); }
+      .message--user { justify-self: end; }
+      .message__label { color: var(--muted); font-size: .82rem; font-weight: 700; }
+      .message--user .message__label { text-align: right; }
+      .bubble { padding: .78rem 1rem; border: 1px solid var(--border); border-radius: 1rem; background: var(--surface-raised); overflow-wrap: anywhere; }
+      .message--user .bubble { border-color: #3d79bd; background: var(--user); }
+      .bubble > :first-child { margin-top: 0; }
+      .bubble > :last-child { margin-bottom: 0; }
+      .bubble p, .bubble ul, .bubble ol { margin: .45rem 0; }
+      .bubble ul, .bubble ol { padding-left: 1.3rem; }
+      .bubble code { padding: .08rem .28rem; border-radius: .25rem; background: #071426; color: #d5e8ff; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .92em; }
+      .bubble a { color: #add4ff; }
+      .typing { display: inline-flex; gap: .27rem; align-items: center; color: var(--muted); }
+      .typing span { width: .42rem; height: .42rem; border-radius: 50%; background: currentColor; animation: bounce 1.1s infinite ease-in-out; }
+      .typing span:nth-child(2) { animation-delay: .14s; }
+      .typing span:nth-child(3) { animation-delay: .28s; }
+      @keyframes bounce { 0%, 60%, 100% { transform: translateY(0); } 30% { transform: translateY(-.3rem); } }
+
+      .composer { display: grid; gap: .7rem; }
+      .suggestions { display: flex; flex-wrap: wrap; gap: .5rem; }
+      .suggestion { border: 1px solid var(--border); border-radius: 999px; padding: .42rem .75rem; color: var(--text); background: var(--surface); font-size: .9rem; }
+      .suggestion:hover { border-color: var(--accent); color: var(--accent); }
+      .form { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: .7rem; align-items: end; }
+      textarea { width: 100%; min-height: 3.25rem; max-height: 9rem; resize: vertical; padding: .78rem .9rem; border: 1px solid var(--border); border-radius: .8rem; color: var(--text); background: var(--surface); }
+      textarea::placeholder { color: #8294af; }
+      .send { min-height: 3.25rem; padding: .65rem 1rem; border: 0; border-radius: .8rem; color: var(--accent-ink); background: var(--accent); font-weight: 800; }
+      .send:hover:not(:disabled) { background: #a2ceff; }
+      .status { min-height: 1.5rem; margin: 0; color: var(--muted); font-size: .92rem; }
+      .status--error { padding: .75rem .9rem; border: 1px solid #974a53; border-radius: .75rem; color: var(--error); background: var(--error-surface); }
+      .retry { margin-left: .5rem; border: 1px solid currentColor; border-radius: .4rem; padding: .16rem .45rem; color: inherit; background: transparent; font-size: inherit; font-weight: 700; }
+      .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+      @media (max-width: 34rem) {
+        .app { padding: 1rem; }
+        .chat { min-height: 20rem; }
+        .form { grid-template-columns: 1fr; }
+        .send { width: 100%; }
+      }
+      @media (prefers-reduced-motion: reduce) { .typing span { animation: none; } }
+    </style>
+  </head>
+  <body>
+    <main class="app">
+      <header class="masthead">
+        <span class="eyebrow">Professional profile</span>
+        <h1>Marco Reyes’ CV assistant</h1>
+        <p class="intro">Ask about Marco’s experience, projects, skills, and professional background.</p>
+      </header>
+
+      <section class="chat" aria-label="Conversation" aria-describedby="chat-description">
+        <p id="chat-description" class="sr-only">Answers are based on Marco Reyes’ professional profile.</p>
+        <div id="messages" class="messages" role="log" aria-live="polite" aria-relevant="additions text">
+          <article class="message message--assistant">
+            <span class="message__label">CV assistant</span>
+            <div class="bubble"><p>Hi — I can help you explore Marco’s professional profile. What would you like to know?</p></div>
+          </article>
+        </div>
+      </section>
+
+      <section class="composer" aria-label="Ask a question">
+        <div class="suggestions" aria-label="Suggested questions">
+          <button class="suggestion" type="button">What security-related work has Marco done?</button>
+          <button class="suggestion" type="button">Summarize Marco’s experience.</button>
+          <button class="suggestion" type="button">What is his AI experience?</button>
+        </div>
+        <form id="chat-form" class="form" novalidate>
+          <label class="sr-only" for="message">Your question about Marco’s profile</label>
+          <textarea id="message" name="message" maxlength="12000" placeholder="Ask about Marco’s professional profile…" required></textarea>
+          <button id="send" class="send" type="submit">Send <span class="sr-only">question</span></button>
+        </form>
+        <p id="status" class="status" role="status" aria-live="polite"></p>
+      </section>
+    </main>
+
+    <script>
+      (() => {
+        "use strict";
+
+        const MAX_HISTORY_MESSAGES = 12;
+        const MAX_HISTORY_CHARS = 12000;
+        const messages = document.querySelector("#messages");
+        const form = document.querySelector("#chat-form");
+        const input = document.querySelector("#message");
+        const sendButton = document.querySelector("#send");
+        const status = document.querySelector("#status");
+        const chat = document.querySelector(".chat");
+        let history = [];
+        let conversationState = null;
+        let lastMessage = "";
+
+        function scrollToLatest() {
+          chat.scrollTop = chat.scrollHeight;
+        }
+
+        function boundedHistory() {
+          const selected = [];
+          let characters = 0;
+          for (let index = history.length - 1; index >= 0; index -= 1) {
+            const item = history[index];
+            const size = item.content.length;
+            if (selected.length >= MAX_HISTORY_MESSAGES || characters + size > MAX_HISTORY_CHARS) break;
+            selected.unshift(item);
+            characters += size;
+          }
+          return selected;
+        }
+
+        function appendMessage(role, content, isMarkdown = false) {
+          const article = document.createElement("article");
+          article.className = `message message--${role}`;
+          const label = document.createElement("span");
+          label.className = "message__label";
+          label.textContent = role === "user" ? "You" : "CV assistant";
+          const bubble = document.createElement("div");
+          bubble.className = "bubble";
+          if (isMarkdown) {
+            bubble.append(renderMarkdown(content));
+          } else {
+            const paragraph = document.createElement("p");
+            paragraph.textContent = content;
+            bubble.append(paragraph);
+          }
+          article.append(label, bubble);
+          messages.append(article);
+          scrollToLatest();
+          return article;
+        }
+
+        // A deliberately small Markdown allowlist. Text is always inserted with textContent;
+        // raw HTML is never parsed or assigned with innerHTML.
+        function renderMarkdown(markdown) {
+          const fragment = document.createDocumentFragment();
+          const blocks = String(markdown).replace(/\r\n?/g, "\n").split(/\n{2,}/);
+          blocks.forEach((block) => {
+            if (!block) return;
+            const lines = block.split("\n");
+            const listMatch = lines.every((line) => /^[-*]\s+/.test(line));
+            const orderedMatch = lines.every((line) => /^\d+\.\s+/.test(line));
+            if (listMatch || orderedMatch) {
+              const list = document.createElement(orderedMatch ? "ol" : "ul");
+              lines.forEach((line) => {
+                const item = document.createElement("li");
+                appendInlineMarkdown(item, line.replace(orderedMatch ? /^\d+\.\s+/ : /^[-*]\s+/, ""));
+                list.append(item);
+              });
+              fragment.append(list);
+              return;
+            }
+            const paragraph = document.createElement("p");
+            lines.forEach((line, index) => {
+              if (index > 0) paragraph.append(document.createElement("br"));
+              appendInlineMarkdown(paragraph, line);
+            });
+            fragment.append(paragraph);
+          });
+          return fragment;
+        }
+
+        function appendInlineMarkdown(container, source) {
+          const token = /(\*\*[^*]+\*\*|__[^_]+__|`[^`]+`|\[[^\]]+\]\((?:https?:\/\/)[^)\s]+\))/g;
+          let cursor = 0;
+          for (const match of source.matchAll(token)) {
+            container.append(document.createTextNode(source.slice(cursor, match.index)));
+            const value = match[0];
+            if (value.startsWith("**") || value.startsWith("__")) {
+              const strong = document.createElement("strong");
+              strong.textContent = value.slice(2, -2);
+              container.append(strong);
+            } else if (value.startsWith("`")) {
+              const code = document.createElement("code");
+              code.textContent = value.slice(1, -1);
+              container.append(code);
+            } else {
+              const closing = value.indexOf("](");
+              const link = document.createElement("a");
+              link.textContent = value.slice(1, closing);
+              link.href = value.slice(closing + 2, -1);
+              link.target = "_blank";
+              link.rel = "noopener noreferrer";
+              container.append(link);
+            }
+            cursor = match.index + value.length;
+          }
+          container.append(document.createTextNode(source.slice(cursor)));
+        }
+
+        function setStatus(message, kind = "") {
+          status.className = kind ? `status status--${kind}` : "status";
+          status.replaceChildren(document.createTextNode(message));
+        }
+
+        function showRecoverableError(message) {
+          setStatus(message, "error");
+          const retry = document.createElement("button");
+          retry.className = "retry";
+          retry.type = "button";
+          retry.textContent = "Retry";
+          retry.addEventListener("click", () => send(lastMessage, { retry: true }));
+          status.append(retry);
+          retry.focus();
+        }
+
+        function setLoading(loading) {
+          input.disabled = loading;
+          sendButton.disabled = loading;
+          sendButton.textContent = loading ? "Sending…" : "Send";
+          document.querySelectorAll(".suggestion").forEach((button) => { button.disabled = loading; });
+        }
+
+        async function send(message, { retry = false } = {}) {
+          const cleanMessage = message.trim();
+          if (!cleanMessage) {
+            setStatus("Enter a question before sending.", "error");
+            input.focus();
+            return;
+          }
+          lastMessage = cleanMessage;
+          setStatus("");
+          setLoading(true);
+          if (!retry) appendMessage("user", cleanMessage);
+          input.value = "";
+          const loading = appendMessage("assistant", "", false);
+          const indicator = document.createElement("span");
+          indicator.className = "typing";
+          indicator.setAttribute("role", "status");
+          indicator.setAttribute("aria-label", "Preparing an answer");
+          loading.querySelector(".bubble").replaceChildren(indicator);
+          indicator.append(document.createElement("span"), document.createElement("span"), document.createElement("span"));
+
+          try {
+            const response = await fetch("/api/chat", {
+              method: "POST",
+              headers: { "Content-Type": "application/json", Accept: "application/json, application/problem+json" },
+              body: JSON.stringify({
+                message: cleanMessage,
+                history: boundedHistory(),
+                ...(conversationState ? { state: conversationState } : {})
+              })
+            });
+            const payload = await response.json().catch(() => ({}));
+            loading.remove();
+            if (!response.ok) {
+              handleError(response.status, payload);
+              return;
+            }
+            if (typeof payload.answer !== "string" || payload.status !== "completed") {
+              showRecoverableError("The service returned an incomplete answer. Please try again.");
+              return;
+            }
+            appendMessage("assistant", payload.answer, true);
+            conversationState = payload.state || null;
+            history.push({ role: "user", content: cleanMessage }, { role: "assistant", content: payload.answer });
+            history = boundedHistory();
+          } catch (_) {
+            loading.remove();
+            showRecoverableError("We couldn’t reach the service. Check your connection and try again.");
+          } finally {
+            setLoading(false);
+          }
+        }
+
+        function handleError(httpStatus) {
+          const messagesByStatus = {
+            422: "That question could not be sent. Please shorten it or try different wording.",
+            429: "You’ve sent several questions recently. Please wait a moment, then try again.",
+            503: "The CV assistant is temporarily unavailable. Please try again shortly.",
+            500: "Something went wrong on our side. Please try again."
+          };
+          const message = messagesByStatus[httpStatus] || "We couldn’t complete that request. Please try again.";
+          if (httpStatus === 422) {
+            setStatus(message, "error");
+            input.value = lastMessage;
+            input.focus();
+          } else {
+            showRecoverableError(message);
+          }
+        }
+
+        form.addEventListener("submit", (event) => {
+          event.preventDefault();
+          send(input.value);
+        });
+        document.querySelectorAll(".suggestion").forEach((button) => {
+          button.addEventListener("click", () => {
+            input.value = button.textContent;
+            input.focus();
+          });
+        });
+      })();
+    </script>
+  </body>
+</html>

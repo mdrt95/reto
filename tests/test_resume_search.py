@@ -1,0 +1,255 @@
+"""Focused tests for the derived multilingual resume fact index."""
+
+import pytest
+
+from src.models.profile import load_profile
+from src.tools.profile_tools import (
+    SearchResumeArguments,
+    build_resume_fact_catalog,
+    detect_response_language,
+    search_resume,
+)
+
+
+@pytest.mark.parametrize(
+    ("query", "topic"),
+    [
+        ("¿Cuál es tu experiencia?", "experience"),
+        ("¿Qué proyectos has construido?", "projects"),
+        ("What have you built?", "projects"),
+        ("¿Qué tecnologías dominas?", "skills"),
+        ("What is your stack?", "skills"),
+        ("Tell me about yourself", "summary"),
+        ("What projects has Marco worked in?", "projects"),
+    ],
+)
+def test_universal_search_routes_english_and_spanish_topics(query: str, topic: str) -> None:
+    profile = load_profile("data/profile.json")
+
+    result = search_resume(profile, SearchResumeArguments(query=query))
+
+    assert result.topic == topic
+    assert result.matches
+    assert all(match.fact_id.startswith("fact:") for match in result.matches)
+    assert all(match.source_id for match in result.matches)
+
+
+def test_fact_catalog_is_derived_from_profile_values() -> None:
+    profile = load_profile("data/profile.json")
+
+    catalog = build_resume_fact_catalog(profile)
+
+    assert any(fact.entity == "Sybil" and "FAISS" in fact.text for fact in catalog)
+    assert any(fact.source_id == "education:edu-itcm-ict" for fact in catalog)
+    assert not any(fact.topic == "career_preferences" for fact in catalog)
+
+
+def test_value_fact_ids_do_not_change_when_profile_lists_are_reordered() -> None:
+    profile = load_profile("data/profile.json")
+    reordered = profile.model_copy(
+        update={
+            "skills": profile.skills.model_copy(
+                update={
+                    "programming_languages": list(reversed(profile.skills.programming_languages))
+                }
+            ),
+            "personal": profile.personal.model_copy(
+                update={"languages": list(reversed(profile.personal.languages))}
+            ),
+        }
+    )
+
+    original_ids = {fact.text: fact.fact_id for fact in build_resume_fact_catalog(profile)}
+    reordered_ids = {fact.text: fact.fact_id for fact in build_resume_fact_catalog(reordered)}
+
+    assert reordered_ids["Python"] == original_ids["Python"]
+    assert reordered_ids["Spanish (native)"] == original_ids["Spanish (native)"]
+
+
+def test_normalization_handles_accents_punctuation_and_synonyms() -> None:
+    profile = load_profile("data/profile.json")
+
+    result = search_resume(
+        profile,
+        SearchResumeArguments(query="¿TECNOLOGÍAS, de recuperación semántica?!"),
+    )
+
+    assert result.topic == "skills"
+    assert any("Semantic search" in match.text for match in result.matches)
+
+
+def test_unmatched_named_entity_term_is_reported() -> None:
+    """A search term absent from every candidate is reported as a retrieval diagnostic.
+
+    Never as boundary wording: these are raw terms, and a pronoun lands here as readily
+    as a company name. `find_unknown_entities` is the only source of a named entity.
+    """
+    profile = load_profile("data/profile.json")
+
+    result = search_resume(profile, SearchResumeArguments(query="experience at Google"))
+
+    assert result.profile_missing is True
+    assert result.unmatched_terms == ["google"]
+
+
+def test_missing_career_preferences_are_explicit() -> None:
+    profile = load_profile("data/profile.json")
+
+    result = search_resume(profile, SearchResumeArguments(query="¿Qué tipo de puesto estás buscando?"))
+
+    assert result.topic == "career_preferences"
+    assert result.matches == []
+    assert result.profile_missing is True
+
+
+def test_universal_search_can_exclude_delivered_facts_without_excluding_the_unit() -> None:
+    """Deepening stays inside one entity while advancing past individual facts."""
+    profile = load_profile("data/profile.json")
+    initial = search_resume(
+        profile,
+        SearchResumeArguments(
+            query="Sybil",
+            topic="projects",
+            source_ids=["project:proj-sybil"],
+            limit=1,
+        ),
+    )
+
+    result = search_resume(
+        profile,
+        SearchResumeArguments(
+            query="Sybil",
+            topic="projects",
+            source_ids=["project:proj-sybil"],
+            exclude_fact_ids=[initial.matches[0].fact_id],
+            limit=1,
+        ),
+    )
+
+    assert len(result.matches) == 1
+    assert result.matches[0].fact_id != initial.matches[0].fact_id
+    assert result.matches[0].source_id.startswith("project:proj-sybil")
+
+
+@pytest.mark.parametrize(
+    ("message", "expected"),
+    [
+        ("tell me about Google", ["Google"]),
+        ("Does Marco know Node.js?", []),
+        ("Has Marco used ASP.NET Core?", []),
+        ("What Is Marco's Role?", []),
+        # A short question is capitalization-heavy only because it opens a sentence;
+        # that position carries no proper-noun signal and must not skip detection.
+        ("Did Marco work at Google?", ["Google"]),
+        # Negative control: genuine title-case prose is still skipped, so the fix
+        # above narrows the heuristic rather than disabling it.
+        ("Senior Backend Engineer At Google", []),
+        ("Did Marco work at Banorte or Microsoft?", ["Banorte", "Microsoft"]),
+        ("Tell me about Sybil and FAISS.", []),
+    ],
+)
+def test_unknown_entity_check_handles_case_dots_and_title_case(message: str, expected: list[str]) -> None:
+    """Sentence position, dotted product names, and title-case prose must not skew detection."""
+    from src.tools.profile_tools import find_unknown_entities
+
+    profile = load_profile("data/profile.json")
+
+    assert find_unknown_entities(profile, message) == expected
+
+
+def test_spanish_direct_project_question_renders_the_project_record_narrative() -> None:
+    """A broad Spanish project question renders the smallest project record, not siblings."""
+    from src.agent.claude import UnavailableClassifier, UnavailableGenerator
+    from src.agent.orchestrator import AgentService
+
+    profile = load_profile("data/profile.json")
+    service = AgentService(
+        profile=profile,
+        classifier=UnavailableClassifier(),
+        generator=UnavailableGenerator(),
+    )
+
+    response = service.respond("¿Qué proyectos has construido?", history=[])
+
+    project = profile.projects[0]
+    assert project.narrative is not None
+    assert response.answer == project.narrative.es
+    assert response.trace.answer_mode == "direct"
+    assert response.trace.selected_source_ids == [f"project:{project.id}"]
+
+
+@pytest.mark.parametrize(
+    ("message", "expected"),
+    [
+        ("Está bien, platícame sobre sus habilidades", "es"),
+        ("Cuéntame sobre sus proyectos", "es"),
+        ("What are Marco's skills?", "en"),
+        ("Tell me about the stack", "en"),
+    ],
+)
+def test_language_detection_recognizes_common_spanish_request_words(message: str, expected: str) -> None:
+    """Spanish requests phrased without question words must still get Spanish rendering."""
+    from src.tools.profile_tools import detect_response_language
+
+    assert detect_response_language(message) == expected
+
+
+@pytest.mark.parametrize(
+    ("text", "language"),
+    [
+        # The originally reported failures.
+        ("Qué idiomas habla marco?", "es"),
+        ("Dónde estudió Marco?", "es"),
+        ("Resume ese proyecto.", "es"),
+        # Function words the closed marker set omitted entirely.
+        ("¿Dónde estudió Marco?", "es"),
+        ("¿Cuándo empezó en Global Payments?", "es"),
+        ("¿Quién es Marco?", "es"),
+        ("¿Cuánto tiempo lleva ahí?", "es"),
+        ("Desde cuando trabaja ahi?", "es"),
+        # Morphology, with no marker word present at all.
+        ("Necesito información sobre certificaciones", "es"),
+        ("Explicame detalladamente", "es"),
+        # English must not drift into Spanish.
+        ("What is Marco's resume?", "en"),
+        ("Where did Marco study?", "en"),
+        ("Summarize that project.", "en"),
+        ("What are Marco's achievements?", "en"),
+        ("Tell me about yourself", "en"),
+        ("How long has Marco worked there?", "en"),
+    ],
+)
+def test_response_language_detection(text: str, language: str) -> None:
+    """Detection must read orthography and morphology, not only a word list."""
+    assert detect_response_language(text) == language
+
+
+@pytest.mark.parametrize(
+    ("accented", "unaccented"),
+    [
+        ("¿Dónde estudió Marco?", "Donde estudio Marco?"),
+        ("¿Qué tecnologías dominas?", "Que tecnologias dominas?"),
+        ("¿Cuándo empezó?", "Cuando empezo?"),
+        ("¿Cuál es su experiencia?", "Cual es su experiencia?"),
+    ],
+)
+def test_accent_removal_never_changes_the_detected_language(
+    accented: str, unaccented: str
+) -> None:
+    """Users type without accents constantly; that cannot flip the response language."""
+    assert detect_response_language(accented) == detect_response_language(unaccented)
+
+
+@pytest.mark.parametrize(
+    ("bare", "punctuated"),
+    [
+        ("Resume ese proyecto", "Resume ese proyecto."),
+        ("Qué proyectos", "¿Qué proyectos?"),
+        ("Hablame de tu experiencia", "Hablame de tu experiencia!"),
+    ],
+)
+def test_trailing_punctuation_cannot_hide_the_only_marker(
+    bare: str, punctuated: str
+) -> None:
+    """A sentence-final marker is still a marker; punctuation must not mask it."""
+    assert detect_response_language(punctuated) == detect_response_language(bare) == "es"

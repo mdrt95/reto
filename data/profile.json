@@ -1,0 +1,202 @@
+{
+  "meta": {
+    "schema_version": "1.0",
+    "last_updated": "2026-09-01"
+  },
+
+  "personal": {
+    "name": "Marco Reyes",
+    "title": "Software Engineer | AI/LLM Engineering",
+    "location": "Mexico City, MX (UTC-6)",
+    "email": "reyesmdtor@gmail.com",
+    "phone": "+52 833 147 5924",
+    "languages": [
+      { "language": "Spanish", "level": "native" },
+      { "language": "English", "level": "C1" },
+      { "language": "French", "level": "A2" }
+    ]
+  },
+
+  "skills": {
+    "programming_languages": ["Python", "C#", "JavaScript", "TypeScript", "SQL"],
+    "ai_llm": [
+      "Retrieval-Augmented Generation (RAG)",
+      "LLM APIs",
+      "Embeddings",
+      "Semantic search",
+      "Hybrid retrieval",
+      "Grounding verification",
+      "LLM evaluation",
+      "Agentic workflows"
+    ],
+    "ai_stack": [
+      "FastAPI", "Pydantic", "Anthropic Claude", "Voyage AI",
+      "FAISS", "SQLite FTS5", "Reciprocal Rank Fusion (RRF)"
+    ],
+    "backend_apis": [
+      "ASP.NET Core", "Node.js", "REST APIs",
+      "Entity Framework", "LINQ", "Dapper", "Redis"
+    ],
+    "devops_engineering": [
+      "Git", "Git-based code review workflows",
+      "Azure DevOps", "GitHub Actions",
+      "Unix environments", "TDD", "SDD"
+    ]
+  },
+
+  "experience": [
+    {
+      "id": "exp-global-payments",
+      "role": "Jr. .NET Developer (Full-Stack)",
+      "company": "Global Payments (EVO Payments México)",
+      "start_date": "2025-03",
+      "end_date": null,
+      "current": true,
+      "team_context": "8-person team building a multi-module merchant onboarding platform for point-of-sale devices at Global Payments' Mexico subsidiary. Heavily leveraging AI to continuously ship client requirements across the full SDLC from DEV through production.",
+      "narrative": {
+        "en": "Marco works as a Jr. .NET Developer (Full-Stack) at Global Payments (EVO Payments México) on an 8-person team building a multi-module merchant onboarding platform for point-of-sale devices, heavily leveraging AI to continuously ship client requirements across the full SDLC from development through production.",
+        "es": "Marco trabaja como Jr. .NET Developer (Full-Stack) en Global Payments (EVO Payments México), en un equipo de 8 personas que construye una plataforma de onboarding de comercios multi-módulo para dispositivos de punto de venta, apoyándose fuertemente en IA para entregar continuamente los requisitos de los clientes a lo largo de todo el SDLC, desde desarrollo hasta producción."
+      },
+      "highlights": [
+        {
+          "id": "hl-stakeholder-coord",
+          "summary": "Assisted Senior Engineers and Tech Lead to coordinate communication with stakeholders, QA, and development teams.",
+          "detail": "Clarified requirements, surfaced blockers, and drove each initiative through dev, QA, pre-production, and production environments when required.",
+          "technologies": [],
+          "tags": ["communication", "coordination", "sdlc", "cross-functional"],
+          "narrative": {
+            "en": "Marco assisted senior engineers and the tech lead in coordinating communication with stakeholders, QA, and development teams, clarifying requirements, surfacing blockers, and helping move each initiative through dev, QA, pre-production, and production environments.",
+            "es": "Marco apoyó a los ingenieros senior y al tech lead en la coordinación de la comunicación con stakeholders, QA y equipos de desarrollo, aclarando requisitos, identificando bloqueos y ayudando a avanzar cada iniciativa por los entornos de desarrollo, QA, preproducción y producción."
+          }
+        },
+        {
+          "id": "hl-security-console",
+          "summary": "Built an internal Security Console for provisioning users, roles, and permissions across 7 onboarding applications and all environments.",
+          "detail": "Angular + ASP.NET Core application implementing AOP-based audit logging.",
+          "technologies": ["Angular", "ASP.NET Core", "AOP"],
+          "tags": ["security", "full-stack", "internal-tooling", "audit"],
+          "narrative": {
+            "en": "Marco built an internal Security Console, an Angular and ASP.NET Core application, for provisioning users, roles, and permissions across seven onboarding applications and all environments, implementing AOP-based audit logging.",
+            "es": "Marco construyó una Security Console interna, una aplicación en Angular y ASP.NET Core, para aprovisionar usuarios, roles y permisos en siete aplicaciones de onboarding y todos los entornos, implementando registro de auditoría basado en AOP."
+          }
+        },
+        {
+          "id": "hl-isv-module",
+          "summary": "Collaborated in delivering a new ISV module end-to-end, beating delivery deadline expectations for each environment.",
+          "detail": "Built an internal multi-agent engineering workflow that converted stakeholder user stories into implementation specifications, coordinated specialized AI agents for implementation, and independently reviewed resulting changes against those specifications, helping deliver ahead of expected timelines across environments.",
+          "technologies": ["AI agents", "multi-agent workflow"],
+          "tags": ["ai-engineering", "delivery", "agentic-workflows", "sdlc"],
+          "narrative": {
+            "en": "Marco collaborated in delivering a new ISV module end-to-end, beating delivery deadline expectations for each environment, by building an internal multi-agent engineering workflow that converted stakeholder user stories into implementation specifications, coordinating specialized AI agents for implementation, and independently reviewing the resulting changes against those specifications.",
+            "es": "Marco colaboró en la entrega de un nuevo módulo ISV de principio a fin, superando las expectativas de plazo de entrega para cada entorno, construyendo un flujo de trabajo interno de ingeniería multiagente que convertía las historias de usuario de los stakeholders en especificaciones de implementación, coordinando agentes de IA especializados para la implementación y revisando de forma independiente los cambios resultantes contra esas especificaciones."
+          }
+        },
+        {
+          "id": "hl-performance",
+          "summary": "Implemented Redis and SQL caching, API rate limiting, and security hardening ahead of public-internet exposure.",
+          "detail": "Resolved availability-affecting performance bottlenecks in accordance with Global Payments cybersecurity requirements.",
+          "technologies": ["Redis", "SQL", "rate limiting"],
+          "tags": ["performance", "security", "caching", "cybersecurity"],
+          "narrative": {
+            "en": "Marco implemented Redis and SQL caching, API rate limiting, and security hardening ahead of public-internet exposure, resolving availability-affecting performance bottlenecks in accordance with Global Payments cybersecurity requirements.",
+            "es": "Marco implementó caching con Redis y SQL, límites de tasa en las APIs y fortalecimiento de seguridad antes de la exposición pública a internet, resolviendo cuellos de botella de rendimiento que afectaban la disponibilidad conforme a los requisitos de ciberseguridad de Global Payments."
+          }
+        },
+        {
+          "id": "hl-reusable-apis",
+          "summary": "Built reusable, decoupled API endpoints and backend libraries.",
+          "detail": "Reduced integration overhead and supported independent deployment across onboarding services.",
+          "technologies": ["REST APIs"],
+          "tags": ["api-design", "architecture", "reusability", "decoupling"],
+          "narrative": {
+            "en": "Marco built reusable, decoupled API endpoints and backend libraries, reducing integration overhead and supporting independent deployment across onboarding services.",
+            "es": "Marco construyó endpoints de API reutilizables y desacoplados, además de librerías de backend, reduciendo la sobrecarga de integración y permitiendo el despliegue independiente en los servicios de onboarding."
+          }
+        }
+      ]
+    }
+  ],
+
+  "projects": [
+    {
+      "id": "proj-sybil",
+      "name": "Sybil",
+      "subtitle": "Python Retrieval-Augmented Document Q&A",
+      "status": "in_development",
+      "technologies": [
+        "Python", "FastAPI", "Anthropic Claude", "Voyage AI",
+        "FAISS", "SQLite FTS5", "RAG", "Pydantic", "Starlette"
+      ],
+      "narrative": {
+        "en": "Sybil is Marco's Python-based Retrieval-Augmented Generation system for document question answering.",
+        "es": "Sybil es el sistema de Generación Aumentada por Recuperación (RAG) en Python de Marco para responder preguntas sobre documentos."
+      },
+      "highlights": [
+        {
+          "id": "sybil-hl-rag",
+          "summary": "Python-based RAG system that answers natural-language questions over a PDF corpus with verifiable citations.",
+          "detail": "Exposed through FastAPI APIs using Pydantic models and Starlette responses.",
+          "tags": ["rag", "api", "citations"],
+          "narrative": {
+            "en": "Marco built a Python-based RAG system that answers natural-language questions over a PDF corpus with verifiable citations, exposed through FastAPI APIs using Pydantic models and Starlette responses.",
+            "es": "Marco construyó un sistema RAG en Python que responde preguntas en lenguaje natural sobre un corpus de PDFs con citas verificables, expuesto mediante APIs de FastAPI usando modelos de Pydantic y respuestas de Starlette."
+          }
+        },
+        {
+          "id": "sybil-hl-hybrid",
+          "summary": "Built a hybrid retrieval pipeline combining FAISS semantic vector search with SQLite FTS5 full-text search.",
+          "detail": "Uses 1,024-dimensional Voyage AI voyage-3-lite embeddings merged via Reciprocal Rank Fusion (RRF).",
+          "tags": ["retrieval", "embeddings", "hybrid-search", "vector-search"],
+          "narrative": {
+            "en": "Marco built a hybrid retrieval pipeline combining FAISS semantic vector search with SQLite FTS5 full-text search, using 1,024-dimensional Voyage AI voyage-3-lite embeddings merged via Reciprocal Rank Fusion (RRF).",
+            "es": "Marco construyó un pipeline de recuperación híbrida que combina búsqueda vectorial semántica con FAISS y búsqueda de texto completo con SQLite FTS5, usando embeddings de 1,024 dimensiones de Voyage AI voyage-3-lite fusionados mediante Reciprocal Rank Fusion (RRF)."
+          }
+        },
+        {
+          "id": "sybil-hl-grounding",
+          "summary": "Integrated Anthropic Claude for answer generation with programmatic grounding checks.",
+          "detail": "Verifies every generated citation against chunks actually retrieved for the query. Responses classify results as Fully Grounded, Partially Grounded, or Not Found rather than silently relying on model knowledge.",
+          "tags": ["grounding", "verification", "reliability", "claude"],
+          "narrative": {
+            "en": "Marco integrated Anthropic Claude for answer generation with programmatic grounding checks, verifying every generated citation against the chunks actually retrieved for the query and classifying responses as Fully Grounded, Partially Grounded, or Not Found instead of silently relying on model knowledge.",
+            "es": "Marco integró Anthropic Claude para la generación de respuestas con verificaciones programáticas de fundamentación, verificando cada cita generada contra los fragmentos realmente recuperados para la consulta y clasificando las respuestas como Fully Grounded, Partially Grounded o Not Found en lugar de depender silenciosamente del conocimiento del modelo."
+          }
+        },
+        {
+          "id": "sybil-hl-ingestion",
+          "summary": "Implemented structure-aware ingestion and chunking for complex PDFs.",
+          "detail": "Handles scanned pages, diagrams, and tables to improve retrieval quality beyond plain-text documents.",
+          "tags": ["ingestion", "pdf", "chunking", "document-processing"],
+          "narrative": {
+            "en": "Marco implemented structure-aware ingestion and chunking for complex PDFs, handling scanned pages, diagrams, and tables to improve retrieval quality beyond plain-text documents.",
+            "es": "Marco implementó ingesta y fragmentación (chunking) consciente de la estructura para PDFs complejos, manejando páginas escaneadas, diagramas y tablas para mejorar la calidad de recuperación más allá de documentos de solo texto."
+          }
+        },
+        {
+          "id": "sybil-hl-eval",
+          "summary": "Built an automated LLM evaluation and acceptance-test harness.",
+          "detail": "Covers grounding accuracy, citation resolution, hybrid-retrieval behavior, scanned-page and diagram retrieval, and failure cases. Includes latency and cost-per-query instrumentation.",
+          "tags": ["evaluation", "testing", "metrics", "observability"],
+          "narrative": {
+            "en": "Marco built an automated LLM evaluation and acceptance-test harness covering grounding accuracy, citation resolution, hybrid-retrieval behavior, scanned-page and diagram retrieval, and failure cases, including latency and cost-per-query instrumentation.",
+            "es": "Marco construyó un arnés automatizado de evaluación de LLM y pruebas de aceptación que cubre precisión de fundamentación, resolución de citas, comportamiento de recuperación híbrida, recuperación de páginas escaneadas y diagramas, y casos de falla, incluyendo instrumentación de latencia y costo por consulta."
+          }
+        }
+      ]
+    }
+  ],
+
+  "education": [
+    {
+      "id": "edu-itcm-ict",
+      "degree": "B.S. in ICT Engineering",
+      "institution": "Instituto Tecnológico de Ciudad Madero (ITCM)",
+      "start_year": 2018,
+      "end_year": 2024,
+      "narrative": {
+        "en": "Marco holds a B.S. in ICT Engineering from Instituto Tecnológico de Ciudad Madero (ITCM), from 2018 to 2024.",
+        "es": "Marco cuenta con una Licenciatura en Ingeniería en TIC del Instituto Tecnológico de Ciudad Madero (ITCM), de 2018 a 2024."
+      }
+    }
+  ]
+}
