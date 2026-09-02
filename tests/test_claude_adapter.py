@@ -267,7 +267,16 @@ def test_rephraser_extracts_text_from_fenced_json_and_never_sends_the_profile() 
     profile = load_profile("data/profile.json")
     client = MagicMock()
     client.messages.create.return_value = SimpleNamespace(
-        content=[SimpleNamespace(text='```json\n{"text": "Marco built the Security Console."}\n```')]
+        content=[
+            SimpleNamespace(
+                text=(
+                    '```json\n{"text":"Marco built the Security Console.",'
+                    '"propositions":[{"text":"Marco built the Security Console.",'
+                    '"fact_ids":["fact:experience:exp-global-payments.highlight:'
+                    'hl-security-console"]}]}\n```'
+                )
+            )
+        ]
     )
     rephraser = ClaudeRephraser(
         client=client,
@@ -276,13 +285,14 @@ def test_rephraser_extracts_text_from_fenced_json_and_never_sends_the_profile() 
     catalog = build_resume_fact_catalog(profile)
     facts = [fact for fact in catalog if fact.source_id.endswith("hl-security-console")]
 
-    text = rephraser.rephrase(
+    transformation = rephraser.rephrase(
         message="Tell me about Marco's security work.",
         facts=facts,
         language="en",
     )
 
-    assert text == "Marco built the Security Console."
+    assert transformation.text == "Marco built the Security Console."
+    assert transformation.propositions[0].fact_ids == [facts[0].fact_id]
     request_json = json.dumps(client.messages.create.call_args.kwargs)
     assert '"profile"' not in request_json
     assert profile.personal.phone not in request_json

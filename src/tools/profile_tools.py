@@ -32,6 +32,7 @@ class ResumeFact(BaseModel):
     keywords: list[str] = Field(default_factory=list)
     narrative_en: str | None = None
     narrative_es: str | None = None
+    field_name: Literal["start_date", "end_date", "current"] | None = None
 
 
 def fact_display_text(fact: "ResumeFact", language: Literal["en", "es"]) -> str:
@@ -162,6 +163,7 @@ _TOKEN_ALIASES = {
     "semantico": "semantic",
     "inteligencia": "ai",
     "artificial": "ai",
+    "seguridad": "security",
     "proyectos": "project",
     "proyecto": "project",
     "projects": "project",
@@ -295,6 +297,39 @@ def build_resume_fact_catalog(profile: Profile) -> list[ResumeFact]:
                     narrative_es=highlight.narrative.es if highlight.narrative else None,
                 )
             )
+        # Field projections follow the record and its highlights so existing
+        # source-ordered narrative selection remains stable.
+        facts.extend(
+            [
+                ResumeFact(
+                    fact_id=f"fact:{source_id}:start_date",
+                    source_id=source_id,
+                    topic="experience",
+                    text=experience.start_date,
+                    entity=experience.company,
+                    keywords=[experience.company, "start date", "fecha de inicio"],
+                    field_name="start_date",
+                ),
+                ResumeFact(
+                    fact_id=f"fact:{source_id}:end_date",
+                    source_id=source_id,
+                    topic="experience",
+                    text=experience.end_date or "current role",
+                    entity=experience.company,
+                    keywords=[experience.company, "end date", "fecha de fin"],
+                    field_name="end_date",
+                ),
+                ResumeFact(
+                    fact_id=f"fact:{source_id}:current",
+                    source_id=source_id,
+                    topic="experience",
+                    text="current" if experience.current else "not current",
+                    entity=experience.company,
+                    keywords=[experience.company, "current", "actual"],
+                    field_name="current",
+                ),
+            ]
+        )
     for project in profile.projects:
         source_id = f"project:{project.id}"
         facts.append(

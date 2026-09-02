@@ -5,7 +5,16 @@ import logging
 import re
 from typing import Literal, Protocol
 
+from src.agent.answer_planning import (
+    AnswerPlanner,
+    DirectAnswerRenderer,
+    SynthesisFallbackRenderer,
+    ToolResult,
+    plan_trace_fields,
+)
 from src.agent.contracts import (
+    AnswerMode,
+    AnswerPlan,
     AgentResponse,
     AgentTrace,
     ClaimKind,
@@ -16,9 +25,15 @@ from src.agent.contracts import (
     Intent,
     IntentDecision,
     InvalidStructuredOutputError,
+    SynthesisTransformation,
 )
 from src.agent.grounding import profile_source_ids, verify_claims
-from src.agent.rephrase import verify_rephrase
+from src.agent.rephrase import (
+    count_sentences,
+    verify_rephrase,
+    verify_synthesis_structure,
+    verify_synthesis_text,
+)
 from src.guardrails.input_guard import evaluate_input
 from src.guardrails.output_guard import evaluate_output
 from src.models.profile import Profile
@@ -125,7 +140,6 @@ _FALLBACK_NOTICE = {
     ),
 }
 
-
 class IntentClassifier(Protocol):
     """Port for a model-backed structured intent classifier."""
 
@@ -155,10 +169,7 @@ class Rephraser(Protocol):
         message: str,
         facts: list[ResumeFact],
         language: Literal["en", "es"],
-    ) -> str: ...
-
-
-ToolResult = ExperienceFilterResult | ProfileQueryResult | ProfileSummaryPlan | ProjectSearchResult | ResumeSearchResult
+    ) -> SynthesisTransformation: ...
 
 
 class AgentService:
@@ -176,6 +187,9 @@ class AgentService:
         self._classifier = classifier
         self._generator = generator
         self._rephraser = rephraser
+        self._answer_planner = AnswerPlanner(profile)
+        self._direct_answer_renderer = DirectAnswerRenderer(profile)
+        self._synthesis_fallback_renderer = SynthesisFallbackRenderer(profile)
 
     def respond(
         self,
@@ -195,6 +209,7 @@ class AgentService:
         unknown_entities = find_unknown_entities(self._profile, message)
         if unknown_entities:
             language = detect_response_language(message)
+            boundary_plan = self._answer_planner.boundary_plan(message, state)
             entities = ", ".join(unknown_entities)
             answer = (
                 f"No encontré nada sobre {entities} en el perfil de Marco, "
@@ -205,12 +220,17 @@ class AgentService:
             )
             return AgentResponse(
                 answer=answer,
-                trace=AgentTrace(grounding_status="profile_missing"),
+                trace=AgentTrace(
+                    grounding_status="profile_missing",
+                    **plan_trace_fields(boundary_plan, "canonical_not_found"),
+                ),
             )
 
-        follow_up = self._follow_up_plan(message, state, history)
+        explicit_plan = self._answer_planner.explicit_direct_plan(message)
+        follow_up = None if explicit_plan is not None else self._follow_up_plan(message, state, history)
         if follow_up == "clarify":
             language = detect_response_language(message)
+            boundary_plan = self._answer_planner.boundary_plan(message, state)
             answer = (
                 "¿A qué parte o elemento anterior te refieres?"
                 if language == "es"
@@ -218,13 +238,17 @@ class AgentService:
             )
             return AgentResponse(
                 answer=answer,
-                trace=AgentTrace(grounding_status="clarification"),
+                trace=AgentTrace(
+                    grounding_status="clarification",
+                    **plan_trace_fields(boundary_plan, "clarification"),
+                ),
                 state=state,
             )
 
         normalized_message = " ".join(message.casefold().split())
         if any(marker in normalized_message for marker in _RANKING_MARKERS):
             language = detect_response_language(message)
+            boundary_plan = self._answer_planner.boundary_plan(message, state)
             answer = (
                 "No puedo ordenar la experiencia de Marco de forma subjetiva. Indica un "
                 "criterio objetivo del perfil, como una tecnología, etiqueta o rol, y "
@@ -236,7 +260,10 @@ class AgentService:
             )
             return AgentResponse(
                 answer=answer,
-                trace=AgentTrace(grounding_status="clarification"),
+                trace=AgentTrace(
+                    grounding_status="clarification",
+                    **plan_trace_fields(boundary_plan, "clarification"),
+                ),
             )
 
         fallback_reason: str | None = None
@@ -246,10 +273,19 @@ class AgentService:
             fallback_reason = _fallback_reason_for(error, stage="classifier")
             _log_generation_fallback(fallback_reason, stage="classifier")
             decision = self._bounded_intent_fallback(message)
+            if decision is None and explicit_plan is not None:
+                decision = IntentDecision(intent=Intent.DIRECT_QUESTION, confidence=1.0)
             if decision is None:
                 if follow_up is None and self._resume_search_arguments(message, state) is None:
                     raise
                 decision = IntentDecision(intent=Intent.FOLLOW_UP, confidence=1.0)
+        if explicit_plan is not None:
+            return self._direct_plan_response(
+                plan=explicit_plan,
+                decision=decision,
+                message=message,
+                fallback_reason=fallback_reason,
+            )
         if decision.intent in {Intent.OUT_OF_SCOPE, Intent.ADVERSARIAL}:
             language = detect_response_language(message)
             answer = (
@@ -270,6 +306,7 @@ class AgentService:
             )
         if decision.confidence < 0.7 and self._resume_search_arguments(message, state) is None:
             language = detect_response_language(message)
+            boundary_plan = self._answer_planner.boundary_plan(message, state)
             answer = (
                 "¿Podrías aclarar a qué parte del perfil profesional de Marco te refieres?"
                 if language == "es"
@@ -282,6 +319,7 @@ class AgentService:
                     intent_confidence=decision.confidence,
                     grounding_status="clarification",
                     fallback_reason=fallback_reason,
+                    **plan_trace_fields(boundary_plan, "clarification"),
                 ),
             )
 
@@ -293,6 +331,10 @@ class AgentService:
             if universal_arguments is not None:
                 tool_name = "search_resume"
                 tool_result = search_resume(self._profile, universal_arguments)
+        answer_plan = self._answer_planner.plan_from_tool(
+            message,
+            tool_result,
+        )
         if isinstance(tool_result, ProfileQueryResult):
             tool_result_count = len(tool_result.value)
         elif isinstance(tool_result, ProfileSummaryPlan):
@@ -300,26 +342,51 @@ class AgentService:
         else:
             tool_result_count = len(getattr(tool_result, "matches", [])) if tool_result else 0
         if isinstance(tool_result, ResumeSearchResult) and tool_result.profile_missing:
-            return self._profile_missing_response(decision, tool_result, tool_name)
+            return self._profile_missing_response(
+                decision, tool_result, tool_name, answer_plan
+            )
         if isinstance(tool_result, ProfileQueryResult) and tool_result.field in {
             "skills",
             "languages",
             "education",
             "current_role",
             "companies",
-        }:
+        } and answer_plan.synthesis_dimension is None:
             return self._list_rendered_response(
                 decision=decision,
                 tool_name=tool_name,
                 tool_result=tool_result,
                 tool_result_count=tool_result_count,
                 message=message,
+                answer_plan=answer_plan,
             )
+        if answer_plan.mode is AnswerMode.DIRECT and answer_plan.selected_fact_ids:
+            return self._direct_plan_response(
+                plan=answer_plan,
+                decision=decision,
+                message=message,
+                fallback_reason=fallback_reason,
+                tool_name_override=tool_name,
+                tool_result_count=tool_result_count,
+            )
+        if answer_plan.synthesis_dimension is not None:
+            synthesis_response = self._bounded_synthesis_response(
+                decision=decision,
+                tool_name=tool_name,
+                tool_result=tool_result,
+                tool_result_count=tool_result_count,
+                message=message,
+                history=history,
+                answer_plan=answer_plan,
+                initial_fallback_reason=fallback_reason,
+            )
+            if synthesis_response is not None:
+                return synthesis_response
         allowed_sources = profile_source_ids(self._profile)
-        selected_fact_ids = self._selected_fact_ids(tool_result)
+        selected_fact_ids = set(self._answer_planner.ordered_fact_ids(tool_result))
         allowed_facts = self._allowed_facts(selected_fact_ids)
         if self._rephraser is not None:
-            tool_ordered_fact_ids = self._tool_ordered_fact_ids(tool_result)
+            tool_ordered_fact_ids = self._answer_planner.ordered_fact_ids(tool_result)
             if 0 < len(tool_ordered_fact_ids) <= 8:
                 rendered = self._fact_selection_response(
                     decision=decision,
@@ -329,6 +396,8 @@ class AgentService:
                     tool_result_count=tool_result_count,
                     message=message,
                     generator_skipped=True,
+                    answer_plan=answer_plan,
+                    fallback_reason=fallback_reason,
                 )
                 if rendered is not None:
                     return rendered
@@ -350,6 +419,7 @@ class AgentService:
                 tool_result_count=tool_result_count,
                 message=message,
                 fallback_reason=fallback_reason,
+                answer_plan=answer_plan,
             )
             if fallback is not None:
                 return fallback
@@ -374,6 +444,8 @@ class AgentService:
                 tool_result=tool_result,
                 tool_result_count=tool_result_count,
                 message=message,
+                answer_plan=answer_plan,
+                fallback_reason=fallback_reason,
             )
             if rendered is not None:
                 return rendered
@@ -396,6 +468,7 @@ class AgentService:
                     tool_result_count=tool_result_count,
                     message=message,
                     fallback_reason=fallback_reason,
+                    answer_plan=answer_plan,
                 )
                 if fallback is not None:
                     return fallback
@@ -454,6 +527,7 @@ class AgentService:
                         tool_result_count=tool_result_count,
                         grounding_status=grounding.status,
                         fallback_reason=fallback_reason,
+                        **plan_trace_fields(answer_plan, "canonical_fallback"),
                     ),
                 )
             if used_tool_fallback and isinstance(tool_result, ProfileSummaryPlan):
@@ -485,6 +559,7 @@ class AgentService:
                     grounding_status=grounding.status,
                     guardrail_output="blocked",
                     fallback_reason=fallback_reason,
+                    **plan_trace_fields(answer_plan, "canonical_fallback"),
                 ),
             )
         return AgentResponse(
@@ -497,8 +572,63 @@ class AgentService:
                 grounding_status=grounding.status,
                 claim_source_ids=accepted_source_ids,
                 fallback_reason=fallback_reason,
+                **plan_trace_fields(answer_plan, "generated"),
             ),
             state=self._state_from_result(tool_name, tool_result, accepted_source_ids, message),
+        )
+
+    def _direct_plan_response(
+        self,
+        *,
+        plan: AnswerPlan,
+        decision: IntentDecision,
+        message: str,
+        fallback_reason: str | None,
+        tool_name_override: str | None = None,
+        tool_result_count: int | None = None,
+    ) -> AgentResponse:
+        """Render a selected direct plan locally, with no generation or rephrase call."""
+        catalog = {fact.fact_id: fact for fact in build_resume_fact_catalog(self._profile)}
+        selected = [catalog[fact_id] for fact_id in plan.selected_fact_ids]
+        answer = self._direct_answer_renderer.render(plan)
+        output_result = evaluate_output(answer, self._profile)
+        if not output_result.allowed:
+            answer = (
+                "Puedo ayudarte con el perfil profesional público de Marco, pero no puedo proporcionar esa información."
+                if plan.language == "es"
+                else "I can help with Marco's public professional profile, but I can't provide that information."
+            )
+        tool_name = tool_name_override or {
+            "tag": "filter_experience",
+            "projects": "search_projects",
+        }.get(plan.requested_field, "search_resume")
+        result = ResumeSearchResult(
+            query=message,
+            language=plan.language,
+            topic=plan.topic,
+            matches=selected,
+        )
+        return AgentResponse(
+            answer=answer,
+            trace=AgentTrace(
+                intent=decision.intent.value,
+                intent_confidence=decision.confidence,
+                tool_name=tool_name,
+                tool_result_count=tool_result_count if tool_result_count is not None else len(selected),
+                grounding_status="fact_rendered",
+                guardrail_output="pass" if output_result.allowed else "blocked",
+                claim_source_ids=plan.selected_source_ids,
+                fallback_reason=fallback_reason,
+                generator_skipped=True,
+                answer_mode=plan.mode.value,
+                rendering_mode="canonical",
+                answer_topic=plan.topic,
+                answer_scope=plan.scope,
+                requested_field=plan.requested_field,
+                selected_fact_ids=plan.selected_fact_ids,
+                selected_source_ids=plan.selected_source_ids,
+            ),
+            state=self._state_from_result(tool_name, result, plan.selected_source_ids, message),
         )
 
     def _execute_tool(
@@ -523,7 +653,7 @@ class AgentService:
             filter_by = decision.filter_by if decision.filter_by in {"technology", "tag", "role"} else "tag"
             filter_value = decision.filter_value
             if not has_filter_plan:
-                tag_override = self._profile_tag_match(message)
+                tag_override = self._answer_planner.profile_tag_match(message)
                 if tag_override is not None:
                     filter_by = "tag"
                     filter_value = tag_override
@@ -543,7 +673,7 @@ class AgentService:
                 message,
             )
         if decision.intent is Intent.SUMMARY_REQUEST:
-            tag_override = self._profile_tag_match(message)
+            tag_override = self._answer_planner.profile_tag_match(message)
             if tag_override is not None:
                 return "filter_experience", filter_experience(
                     self._profile,
@@ -561,6 +691,13 @@ class AgentService:
                 SummarizeProfileArguments(audience=audience),
             )
         profile_field = decision.profile_field
+        explicit_field = self._explicit_profile_field(message)
+        if explicit_field is not None:
+            profile_field = explicit_field
+        elif profile_field == "companies" and not self._is_employment_history_question(message):
+            # Employer projection is intentionally narrow: a coarse classifier field
+            # cannot turn an unrelated direct question into an employer list.
+            profile_field = None
         if (
             decision.intent in {Intent.DIRECT_QUESTION, Intent.FOLLOW_UP}
             and profile_field is None
@@ -618,26 +755,302 @@ class AgentService:
                 return result
         return None
 
-    def _profile_tag_match(self, message: str) -> str | None:
-        """Return the first profile-defined experience highlight tag named in the message.
+    def _bounded_synthesis_response(
+        self,
+        *,
+        decision: IntentDecision,
+        tool_name: str | None,
+        tool_result: ToolResult | None,
+        tool_result_count: int,
+        message: str,
+        history: list[object],
+        answer_plan: AnswerPlan,
+        initial_fallback_reason: str | None,
+    ) -> AgentResponse | None:
+        """Transform only the planner's bounded facts, or return one concise fallback."""
+        assert answer_plan.synthesis_dimension is not None
+        catalog = {fact.fact_id: fact for fact in build_resume_fact_catalog(self._profile)}
+        selected_facts = [
+            catalog[fact_id]
+            for fact_id in answer_plan.selected_fact_ids
+            if fact_id in catalog
+        ]
+        if not selected_facts:
+            return None
 
-        Built directly from `experience[].highlights[].tags` — not the mixed
-        technology/tag keyword bag — so a generic word never masquerades as a tag (D-032).
-        """
-        normalized_message = normalize_resume_text(message)
-        message_tokens = set(normalized_message.split())
-        for experience in self._profile.experience:
-            for highlight in experience.highlights:
-                for tag in highlight.tags:
-                    normalized_tag = normalize_resume_text(tag)
-                    if not normalized_tag:
-                        continue
-                    if " " in normalized_tag:
-                        if normalized_tag in normalized_message:
-                            return tag
-                    elif normalized_tag in message_tokens:
-                        return tag
-        return None
+        transformation_outcome: str
+        fallback_reason = initial_fallback_reason
+        rephrase_outcome: str | None = None
+        answer: str | None = None
+        generator_skipped = self._rephraser is not None
+        impact_without_outcome = (
+            answer_plan.synthesis_dimension == "impact"
+            and not any(
+                self._answer_planner.has_explicit_outcome(fact)
+                for fact in selected_facts
+            )
+        )
+        if impact_without_outcome:
+            transformation_outcome = "rejected:missing_impact_evidence"
+            fallback_reason = fallback_reason or "missing_explicit_impact"
+            rephrase_outcome = "rejected:missing_impact_evidence"
+            generator_skipped = True
+        elif self._rephraser is not None:
+            try:
+                candidate = self._rephraser.rephrase(
+                    message=message,
+                    facts=selected_facts,
+                    language=answer_plan.language,
+                )
+            except GenerationUnavailableError as error:
+                reason = _fallback_reason_for(error, stage="rephraser")
+                _log_generation_fallback(reason, stage="rephraser")
+                fallback_reason = fallback_reason or reason
+                rephrase_outcome = reason
+                transformation_outcome = f"unavailable:{reason}"
+            else:
+                selected_ids = set(answer_plan.selected_fact_ids)
+                mappings_are_valid = all(
+                    proposition.fact_ids
+                    and set(proposition.fact_ids) <= selected_ids
+                    for proposition in candidate.propositions
+                )
+                mapped_text = " ".join(
+                    proposition.text.strip() for proposition in candidate.propositions
+                )
+                proposition_verdicts = [
+                    verify_synthesis_text(
+                        text=proposition.text,
+                        selected_facts=[catalog[fact_id] for fact_id in proposition.fact_ids],
+                        catalog=list(catalog.values()),
+                        language=answer_plan.language,
+                        dimension=answer_plan.synthesis_dimension,
+                    )
+                    for proposition in candidate.propositions
+                    if mappings_are_valid
+                ]
+                if not mappings_are_valid:
+                    verdict_code = "missing_fact_ids"
+                elif mapped_text != candidate.text.strip():
+                    verdict_code = "unmapped_text"
+                else:
+                    rejected = next(
+                        (verdict for verdict in proposition_verdicts if not verdict.allowed),
+                        None,
+                    )
+                    if rejected is not None:
+                        verdict_code = rejected.code
+                    else:
+                        structure_verdict = verify_synthesis_structure(
+                            text=mapped_text,
+                            proposition_fact_ids=[
+                                proposition.fact_ids for proposition in candidate.propositions
+                            ],
+                            proposition_texts=[
+                                proposition.text for proposition in candidate.propositions
+                            ],
+                            dimension=answer_plan.synthesis_dimension,
+                            detail_requested=self._answer_planner.detail_requested(message),
+                        )
+                        if not structure_verdict.allowed:
+                            verdict_code = structure_verdict.code
+                        else:
+                            whole_verdict = verify_synthesis_text(
+                                text=mapped_text,
+                                selected_facts=selected_facts,
+                                catalog=list(catalog.values()),
+                                language=answer_plan.language,
+                                dimension=answer_plan.synthesis_dimension,
+                            )
+                            verdict_code = (
+                                "accepted" if whole_verdict.allowed else whole_verdict.code
+                            )
+                if verdict_code == "accepted":
+                    answer = mapped_text
+                    rephrase_outcome = "accepted"
+                    transformation_outcome = "accepted"
+                else:
+                    rephrase_outcome = f"rejected:{verdict_code}"
+                    fallback_reason = fallback_reason or f"synthesis_rejected:{verdict_code}"
+                    transformation_outcome = rephrase_outcome
+        else:
+            try:
+                generated = self._generator.generate(
+                    message=message,
+                    history=history,
+                    allowed_facts=selected_facts,
+                    tool_result=self._project_tool_result(
+                        tool_result=tool_result,
+                        selected_facts=selected_facts,
+                        message=message,
+                        language=answer_plan.language,
+                        topic=answer_plan.topic,
+                    ),
+                    allowed_source_ids=set(answer_plan.selected_source_ids),
+                )
+            except GenerationUnavailableError as error:
+                reason = _fallback_reason_for(error, stage="generator")
+                _log_generation_fallback(reason, stage="generator")
+                fallback_reason = fallback_reason or reason
+                transformation_outcome = f"unavailable:{reason}"
+            else:
+                selected_ids = set(answer_plan.selected_fact_ids)
+                mapped_claims = [
+                    claim
+                    for claim in generated.claims
+                    if claim.fact_ids
+                    and set(claim.fact_ids) <= selected_ids
+                    and set(claim.source_ids) <= set(answer_plan.selected_source_ids)
+                    and all(
+                        catalog[fact_id].source_id in claim.source_ids
+                        for fact_id in claim.fact_ids
+                    )
+                ]
+                if len(mapped_claims) != len(generated.claims):
+                    verdict_code = "missing_fact_ids"
+                    transformation_outcome = f"rejected:{verdict_code}"
+                    fallback_reason = fallback_reason or f"synthesis_rejected:{verdict_code}"
+                else:
+                    candidate = " ".join(claim.text.strip() for claim in mapped_claims)
+                    proposition_verdicts = [
+                        verify_synthesis_text(
+                            text=claim.text,
+                            selected_facts=[catalog[fact_id] for fact_id in claim.fact_ids],
+                            catalog=list(catalog.values()),
+                            language=answer_plan.language,
+                            dimension=answer_plan.synthesis_dimension,
+                        )
+                        for claim in mapped_claims
+                    ]
+                    rejected = next(
+                        (verdict for verdict in proposition_verdicts if not verdict.allowed),
+                        None,
+                    )
+                    structure_verdict = verify_synthesis_structure(
+                        text=candidate,
+                        proposition_fact_ids=[claim.fact_ids for claim in mapped_claims],
+                        proposition_texts=[claim.text for claim in mapped_claims],
+                        dimension=answer_plan.synthesis_dimension,
+                        detail_requested=self._answer_planner.detail_requested(message),
+                    )
+                    whole_verdict = verify_synthesis_text(
+                        text=candidate,
+                        selected_facts=selected_facts,
+                        catalog=list(catalog.values()),
+                        language=answer_plan.language,
+                        dimension=answer_plan.synthesis_dimension,
+                    )
+                    verdict = rejected or (
+                        structure_verdict if not structure_verdict.allowed else whole_verdict
+                    )
+                    if verdict.allowed:
+                        answer = candidate
+                        transformation_outcome = "accepted"
+                    else:
+                        fallback_reason = fallback_reason or f"synthesis_rejected:{verdict.code}"
+                        transformation_outcome = f"rejected:{verdict.code}"
+
+        rendering_mode = "transformed"
+        grounding_status = "rephrased" if self._rephraser is not None else "fully_grounded"
+        if answer is None:
+            rendering_mode = "canonical_fallback"
+            grounding_status = (
+                "fact_rendered"
+                if transformation_outcome.startswith("rejected") and self._rephraser is not None
+                else "tool_fallback"
+            )
+            notice = _FALLBACK_NOTICE[answer_plan.language]
+            body = self._synthesis_fallback_renderer.render(
+                answer_plan,
+                max_words=75 - len(notice.split()),
+            )
+            if not body:
+                return None
+            answer = f"{notice}\n{body}"
+
+        output_result = evaluate_output(answer, self._profile)
+        if not output_result.allowed:
+            return None
+        result = ResumeSearchResult(
+            query=message,
+            language=answer_plan.language,
+            topic=answer_plan.topic,
+            matches=selected_facts,
+        )
+        source_ids = list(dict.fromkeys(fact.source_id for fact in selected_facts))
+        return AgentResponse(
+            answer=answer,
+            trace=AgentTrace(
+                intent=decision.intent.value,
+                intent_confidence=decision.confidence,
+                tool_name=tool_name,
+                tool_result_count=tool_result_count,
+                grounding_status=grounding_status,
+                claim_source_ids=source_ids,
+                rephrase_outcome=rephrase_outcome,
+                fallback_reason=fallback_reason,
+                generator_skipped=generator_skipped,
+                transformation_outcome=transformation_outcome,
+                final_word_count=len(answer.split()),
+                final_sentence_count=count_sentences(answer),
+                **plan_trace_fields(answer_plan, rendering_mode),
+            ),
+            state=self._state_from_result(tool_name, result, source_ids, message),
+        )
+
+    @staticmethod
+    def _project_tool_result(
+        *,
+        tool_result: ToolResult | None,
+        selected_facts: list[ResumeFact],
+        message: str,
+        language: Literal["en", "es"],
+        topic: ResumeTopic,
+    ) -> ToolResult:
+        """Preserve the tool contract while removing every unselected fact."""
+        fact_ids = {fact.fact_id for fact in selected_facts}
+        source_ids = {fact.source_id for fact in selected_facts}
+        if isinstance(tool_result, ResumeSearchResult):
+            return tool_result.model_copy(
+                update={"matches": [fact for fact in tool_result.matches if fact.fact_id in fact_ids]}
+            )
+        if isinstance(tool_result, ProjectSearchResult):
+            return tool_result.model_copy(
+                update={
+                    "matches": [
+                        match for match in tool_result.matches if match.source_id in source_ids
+                    ]
+                }
+            )
+        if isinstance(tool_result, ExperienceFilterResult):
+            return tool_result.model_copy(
+                update={
+                    "matches": [
+                        match for match in tool_result.matches if match.source_id in source_ids
+                    ]
+                }
+            )
+        if isinstance(tool_result, ProfileSummaryPlan):
+            return tool_result.model_copy(
+                update={
+                    "fact_ids": [fact.fact_id for fact in selected_facts],
+                    "source_ids": list(dict.fromkeys(fact.source_id for fact in selected_facts)),
+                }
+            )
+        if isinstance(tool_result, ProfileQueryResult):
+            selected_text = {fact.text for fact in selected_facts}
+            return tool_result.model_copy(
+                update={
+                    "value": [value for value in tool_result.value if value in selected_text],
+                    "source_ids": list(dict.fromkeys(fact.source_id for fact in selected_facts)),
+                }
+            )
+        return ResumeSearchResult(
+            query=message,
+            language=language,
+            topic=topic,
+            matches=selected_facts,
+        )
 
     def _tool_fallback_response(
         self,
@@ -648,6 +1061,7 @@ class AgentService:
         tool_result_count: int,
         message: str,
         fallback_reason: str | None = None,
+        answer_plan: AnswerPlan,
     ) -> AgentResponse | None:
         """Return verified deterministic facts after model generation is unavailable."""
         language = detect_response_language(message)
@@ -675,6 +1089,7 @@ class AgentService:
                 grounding_status="tool_fallback",
                 claim_source_ids=accepted_source_ids,
                 fallback_reason=fallback_reason,
+                **plan_trace_fields(answer_plan, "canonical_fallback"),
             ),
             state=self._state_from_result(tool_name, tool_result, accepted_source_ids, message),
         )
@@ -689,6 +1104,8 @@ class AgentService:
         tool_result_count: int,
         message: str,
         generator_skipped: bool = False,
+        answer_plan: AnswerPlan,
+        fallback_reason: str | None = None,
     ) -> AgentResponse | None:
         """Render provider- or tool-selected fact IDs exclusively from canonical fact values."""
         catalog = {fact.fact_id: fact for fact in build_resume_fact_catalog(self._profile)}
@@ -708,17 +1125,20 @@ class AgentService:
         answer = self._render_resume_result(result)
         grounding_status = "fact_rendered"
         rephrase_outcome: str | None = None
+        rendering_fallback_reason = fallback_reason
         if self._rephraser is not None:
             try:
-                rephrased_text = self._rephraser.rephrase(
+                transformation = self._rephraser.rephrase(
                     message=message,
                     facts=selected_facts,
                     language=result.language,
                 )
             except GenerationUnavailableError as error:
                 rephrase_outcome = _fallback_reason_for(error, stage="rephraser")
+                rendering_fallback_reason = rephrase_outcome
                 _log_generation_fallback(rephrase_outcome, stage="rephraser")
             else:
+                rephrased_text = transformation.text
                 verdict = verify_rephrase(
                     text=rephrased_text,
                     selected_facts=selected_facts,
@@ -745,7 +1165,12 @@ class AgentService:
                 grounding_status=grounding_status,
                 claim_source_ids=source_ids,
                 rephrase_outcome=rephrase_outcome,
+                fallback_reason=rendering_fallback_reason,
                 generator_skipped=generator_skipped,
+                **plan_trace_fields(
+                    answer_plan,
+                    "rephrased" if rephrase_outcome == "accepted" else "canonical",
+                ),
             ),
             state=self._state_from_result(tool_name, result, source_ids, message),
         )
@@ -817,22 +1242,6 @@ class AgentService:
             return bool(tool_result.source_ids)
         return bool(getattr(tool_result, "matches", []))
 
-    def _selected_fact_ids(self, tool_result: ToolResult | None) -> set[str]:
-        if isinstance(tool_result, ResumeSearchResult):
-            return {match.fact_id for match in tool_result.matches}
-        if isinstance(tool_result, ProfileSummaryPlan):
-            return set(tool_result.fact_ids)
-        # Exact source_id match only (D-031): a highlight match must not also
-        # authorize its parent experience/project fact, and a base project/experience
-        # match already carries its own exact source_id.
-        _, source_ids = self._verified_tool_facts(tool_result)
-        source_id_set = set(source_ids)
-        return {
-            fact.fact_id
-            for fact in build_resume_fact_catalog(self._profile)
-            if fact.source_id in source_id_set
-        }
-
     def _allowed_facts(self, selected_fact_ids: set[str]) -> list[ResumeFact]:
         """Resolve the turn's selected fact IDs into the canonical facts the generator may cite."""
         return [
@@ -840,31 +1249,6 @@ class AgentService:
             for fact in build_resume_fact_catalog(self._profile)
             if fact.fact_id in selected_fact_ids
         ]
-
-    def _tool_ordered_fact_ids(self, tool_result: ToolResult | None) -> list[str]:
-        """Return the tool's own fact selection in its original order (see DECISIONS.md D-030).
-
-        Used only to decide whether the tool already narrowed the answer to a small,
-        renderable fact set — in which case the generator's reordering/subsetting adds
-        nothing and can be skipped entirely.
-        """
-        if isinstance(tool_result, ResumeSearchResult):
-            return [match.fact_id for match in tool_result.matches]
-        if isinstance(tool_result, ProfileSummaryPlan):
-            return list(dict.fromkeys(tool_result.fact_ids))
-        _, source_ids = self._verified_tool_facts(tool_result)
-        if not source_ids:
-            return []
-        # Exact source_id match only (D-031) — see _selected_fact_ids.
-        catalog = build_resume_fact_catalog(self._profile)
-        ordered: list[str] = []
-        for source_id in source_ids:
-            for fact in catalog:
-                if fact.fact_id in ordered:
-                    continue
-                if fact.source_id == source_id:
-                    ordered.append(fact.fact_id)
-        return ordered
 
     def _list_rendered_response(
         self,
@@ -874,6 +1258,7 @@ class AgentService:
         tool_result: ProfileQueryResult,
         tool_result_count: int,
         message: str,
+        answer_plan: AnswerPlan,
     ) -> AgentResponse:
         """Render a public profile projection deterministically; no model call is needed.
 
@@ -921,6 +1306,8 @@ class AgentService:
                     tool_result_count=tool_result_count,
                     grounding_status="list_rendered",
                     guardrail_output="blocked",
+                    generator_skipped=True,
+                    **plan_trace_fields(answer_plan, "canonical"),
                 ),
             )
         return AgentResponse(
@@ -932,6 +1319,8 @@ class AgentService:
                 tool_result_count=tool_result_count,
                 grounding_status="list_rendered",
                 claim_source_ids=tool_result.source_ids,
+                generator_skipped=True,
+                **plan_trace_fields(answer_plan, "canonical"),
             ),
             state=self._state_from_result(tool_name, tool_result, tool_result.source_ids, message),
         )
@@ -983,6 +1372,7 @@ class AgentService:
         decision: IntentDecision,
         result: ResumeSearchResult,
         tool_name: str,
+        answer_plan: AnswerPlan,
     ) -> AgentResponse:
         if result.unmatched_terms:
             entities = ", ".join(result.unmatched_terms)
@@ -1006,6 +1396,7 @@ class AgentService:
                 intent_confidence=decision.confidence,
                 tool_name=tool_name,
                 grounding_status="profile_missing",
+                **plan_trace_fields(answer_plan, "canonical_not_found"),
             ),
             state=ConversationState(
                 last_topic=result.topic,
@@ -1205,6 +1596,12 @@ class AgentService:
     def _bounded_intent_fallback(self, message: str) -> IntentDecision | None:
         """Recover only unmistakable profile intents after local classifier JSON failure."""
         normalized = " ".join(message.casefold().split())
+        if self._answer_planner.synthesis_dimension(message) is not None:
+            return IntentDecision(
+                intent=Intent.SUMMARY_REQUEST,
+                confidence=1.0,
+                audience="recruiter",
+            )
         if "summarize" in normalized and any(
             subject in normalized for subject in ("experience", "profile", "career")
         ):
@@ -1271,7 +1668,7 @@ class AgentService:
     @staticmethod
     def _is_employment_history_question(message: str) -> bool:
         """Recognize a small set of general employer-history phrasings."""
-        normalized = " ".join(message.casefold().split())
+        normalized = normalize_resume_text(message)
         return (
             ("where has " in normalized and " worked" in normalized)
             or ("where did " in normalized and " work" in normalized)
@@ -1285,6 +1682,26 @@ class AgentService:
                     "what companies",
                     "past employers",
                     "previous employers",
+                    "en que empresas",
+                    "para que empresas",
+                    "donde ha trabajado",
+                    "que empleadores",
+                    "que companias",
                 )
             )
         )
+
+    @staticmethod
+    def _explicit_profile_field(message: str) -> str | None:
+        """Return an unmistakable current-message profile projection, if any."""
+        normalized = normalize_resume_text(message)
+        for field, markers in _SUMMARY_FIELD_MARKERS.items():
+            if any(marker in normalized for marker in markers):
+                return field
+        if any(marker in normalized for marker in (
+            "current role", "current job", "puesto actual", "trabajo actual",
+        )):
+            return "current_role"
+        if AgentService._is_employment_history_question(message):
+            return "companies"
+        return None

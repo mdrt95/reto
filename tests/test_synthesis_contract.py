@@ -1,0 +1,580 @@
+"""Behavioral contract for concise, source-bounded synthesis answers."""
+
+from dataclasses import dataclass
+
+import pytest
+
+from src.agent.answer_planning import AnswerPlanner
+from src.agent.contracts import (
+    Claim,
+    ClaimKind,
+    GeneratedResponse,
+    GenerationUnavailableError,
+    Intent,
+    IntentDecision,
+    SynthesisProposition,
+    SynthesisTransformation,
+)
+from src.agent.orchestrator import AgentService
+from src.models.profile import load_profile
+from src.tools.profile_tools import (
+    ProfileSummaryPlan,
+    ResumeFact,
+    ResumeSearchResult,
+    SummarizeProfileArguments,
+    fact_display_text,
+    summarize_profile,
+)
+
+
+class SynthesisClassifier:
+    """Stable classifier: the planner, not this double, owns synthesis scope."""
+
+    def classify(self, message: str, history: list[object]) -> IntentDecision:
+        return IntentDecision(
+            intent=Intent.SUMMARY_REQUEST,
+            confidence=0.98,
+            audience="recruiter",
+        )
+
+
+class GeneratorMustNotRun:
+    """Configured synthesis transformation uses only the selected-fact rephraser."""
+
+    def generate(self, **_: object) -> GeneratedResponse:
+        raise AssertionError("the general generator must not run for bounded synthesis")
+
+
+@dataclass(frozen=True)
+class SynthesisCase:
+    message: str
+    dimension: str
+    topic: str
+    language: str
+    candidate: str
+
+
+CASES = (
+    SynthesisCase(
+        "Summarize Marco's experience.",
+        "summary",
+        "experience",
+        "en",
+        (
+            "Marco works as a Jr. .NET Developer at Global Payments and implemented "
+            "caching, resolving availability bottlenecks."
+        ),
+    ),
+    SynthesisCase(
+        "Resume la experiencia de Marco.",
+        "summary",
+        "experience",
+        "es",
+        (
+            "Marco trabaja como Jr. .NET Developer en Global Payments e implementó "
+            "caching, resolviendo cuellos de botella de disponibilidad."
+        ),
+    ),
+    SynthesisCase(
+        "Summarize the projects Marco has worked on.",
+        "summary",
+        "projects",
+        "en",
+        (
+            "Marco built Sybil, a Python RAG system with a hybrid retrieval pipeline "
+            "combining FAISS and SQLite FTS5."
+        ),
+    ),
+    SynthesisCase(
+        "What impact did Marco's work have?",
+        "impact",
+        "experience",
+        "en",
+        (
+            "Marco collaborated on an ISV module, beating delivery expectations, and "
+            "implemented caching, resolving availability bottlenecks."
+        ),
+    ),
+    SynthesisCase(
+        "¿Qué impacto tuvo el trabajo de Marco?",
+        "impact",
+        "experience",
+        "es",
+        (
+            "Marco colaboró en la entrega de un módulo ISV, superando las expectativas "
+            "de plazo, e implementó caching, resolviendo cuellos de botella de disponibilidad."
+        ),
+    ),
+)
+
+
+class RecordingTransformation:
+    """Return one contract candidate and record the exact evidence boundary."""
+
+    def __init__(self, candidate: str) -> None:
+        self._candidate = candidate
+        self.calls: list[dict[str, object]] = []
+
+    def rephrase(
+        self,
+        *,
+        message: str,
+        facts: list[ResumeFact],
+        language: str,
+    ) -> SynthesisTransformation:
+        self.calls.append({"message": message, "facts": facts, "language": language})
+        return SynthesisTransformation(
+            text=self._candidate,
+            propositions=[
+                SynthesisProposition(
+                    text=self._candidate,
+                    fact_ids=[fact.fact_id for fact in facts],
+                )
+            ],
+        )
+
+
+@pytest.mark.parametrize("case", CASES, ids=lambda case: f"{case.dimension}-{case.language}-{case.topic}")
+def test_synthesis_contract_selects_bounded_evidence_and_compresses_it(
+    case: SynthesisCase,
+) -> None:
+    profile = load_profile("data/profile.json")
+    transformer = RecordingTransformation(case.candidate)
+    service = AgentService(
+        profile=profile,
+        classifier=SynthesisClassifier(),
+        generator=GeneratorMustNotRun(),
+        rephraser=transformer,
+    )
+
+    response = service.respond(case.message, history=[])
+
+    assert response.trace.answer_mode == "synthesis"
+    assert response.trace.synthesis_dimension == case.dimension
+    assert response.trace.answer_topic == case.topic
+    assert response.trace.rendering_mode == "transformed"
+    assert response.trace.transformation_outcome == "accepted"
+    assert response.trace.final_sentence_count <= 3
+    assert response.trace.final_word_count <= 75
+    assert response.trace.final_sentence_count >= 1
+    assert response.trace.final_word_count == len(response.answer.split())
+    assert response.answer == case.candidate
+    assert len(transformer.calls) == 1
+    call = transformer.calls[0]
+    assert call["language"] == case.language
+    selected_facts = call["facts"]
+    assert isinstance(selected_facts, list)
+    assert 1 < len(selected_facts) <= 4
+    assert [fact.fact_id for fact in selected_facts] == response.trace.selected_fact_ids
+    assert list(dict.fromkeys(fact.source_id for fact in selected_facts)) == (
+        response.trace.selected_source_ids
+    )
+    assert len(response.trace.selected_fact_ids) == len(set(response.trace.selected_fact_ids))
+    if case.dimension == "impact":
+        selected_text = " ".join(fact.text.casefold() for fact in selected_facts)
+        assert any(
+            outcome in selected_text
+            for outcome in ("ahead", "beating", "resolved", "reduced", "improve")
+        )
+
+
+@pytest.mark.parametrize(
+    ("english", "spanish"),
+    [
+        ("Summarize Marco's experience.", "Resume la experiencia de Marco."),
+        ("What impact did Marco's work have?", "¿Qué impacto tuvo el trabajo de Marco?"),
+    ],
+)
+def test_equivalent_synthesis_requests_select_identical_canonical_scopes(
+    english: str,
+    spanish: str,
+) -> None:
+    profile = load_profile("data/profile.json")
+    planner = AnswerPlanner(profile)
+    tool_plan = summarize_profile(
+        profile,
+        SummarizeProfileArguments(audience="recruiter"),
+    )
+
+    english_plan = planner.plan_from_tool(english, tool_plan)
+    spanish_plan = planner.plan_from_tool(spanish, tool_plan)
+
+    assert english_plan.synthesis_dimension == spanish_plan.synthesis_dimension
+    assert english_plan.topic == spanish_plan.topic
+    assert english_plan.selected_fact_ids == spanish_plan.selected_fact_ids
+    assert english_plan.selected_source_ids == spanish_plan.selected_source_ids
+
+
+@pytest.mark.parametrize(
+    ("message", "mode", "candidate"),
+    [
+        ("Summarize Marco's experience.", "outage", None),
+        (
+            "Resume la experiencia de Marco.",
+            "rejection",
+            "Marco led Google to $9M in revenue using Kubernetes.",
+        ),
+    ],
+)
+def test_synthesis_outage_or_rejection_returns_one_concise_canonical_boundary(
+    message: str,
+    mode: str,
+    candidate: str | None,
+) -> None:
+    class BoundaryTransformation:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.facts: list[ResumeFact] = []
+
+        def rephrase(self, **kwargs: object) -> SynthesisTransformation:
+            self.calls += 1
+            facts = kwargs["facts"]
+            assert isinstance(facts, list)
+            self.facts = facts
+            if mode == "outage":
+                raise GenerationUnavailableError("provider unavailable")
+            assert candidate is not None
+            return SynthesisTransformation(
+                text=candidate,
+                propositions=[
+                    SynthesisProposition(
+                        text=candidate,
+                        fact_ids=[fact.fact_id for fact in self.facts],
+                    )
+                ],
+            )
+
+    transformer = BoundaryTransformation()
+    service = AgentService(
+        profile=load_profile("data/profile.json"),
+        classifier=SynthesisClassifier(),
+        generator=GeneratorMustNotRun(),
+        rephraser=transformer,
+    )
+
+    response = service.respond(message, history=[])
+
+    assert transformer.calls == 1
+    assert response.trace.answer_mode == "synthesis"
+    assert response.trace.rendering_mode == "canonical_fallback"
+    assert response.trace.transformation_outcome.startswith(
+        "unavailable" if mode == "outage" else "rejected"
+    )
+    assert response.trace.fallback_reason
+    assert response.trace.final_sentence_count <= 3
+    assert response.trace.final_word_count <= 75
+    assert response.trace.final_word_count == len(response.answer.split())
+    assert "Google" not in response.answer
+    assert "Kubernetes" not in response.answer
+    assert "$9M" not in response.answer
+    assert " led " not in f" {response.answer.casefold()} "
+    selected = transformer.calls and response.trace.selected_fact_ids
+    assert selected
+    rendered_selected = [
+        fact_display_text(fact, "es" if message.startswith("Resume") else "en")
+        for fact in transformer.facts
+    ]
+    assert sum(text in response.answer for text in rendered_selected) < len(rendered_selected)
+
+
+@pytest.mark.parametrize(
+    ("message", "candidate", "forbidden"),
+    [
+        (
+            "Summarize Marco's experience.",
+            "Marco implemented caching with kubernetes.",
+            "kubernetes",
+        ),
+        (
+            "Summarize Marco's experience.",
+            "Google improved availability.",
+            "Google",
+        ),
+        (
+            "Summarize Marco's experience.",
+            "9000 users benefited from caching.",
+            "9000",
+        ),
+        (
+            "Summarize Marco's experience.",
+            "Marco designed caching for availability.",
+            "designed",
+        ),
+        (
+            "Resume la experiencia de Marco.",
+            "Marco implemented caching that resolved availability bottlenecks.",
+            "implemented",
+        ),
+        (
+            "What impact did Marco's work have?",
+            "Marco implemented caching, boosting productivity.",
+            "productivity",
+        ),
+        (
+            "Summarize Marco's experience.",
+            (
+                "Marco implemented caching. it resolved bottlenecks. "
+                "it improved availability. it supported security."
+            ),
+            "it supported security",
+        ),
+    ],
+)
+def test_adversarial_synthesis_never_crosses_the_public_boundary(
+    message: str,
+    candidate: str,
+    forbidden: str,
+) -> None:
+    class AdversarialTransformation:
+        def rephrase(self, **kwargs: object) -> SynthesisTransformation:
+            facts = kwargs["facts"]
+            assert isinstance(facts, list)
+            return SynthesisTransformation(
+                text=candidate,
+                propositions=[
+                    SynthesisProposition(
+                        text=candidate,
+                        fact_ids=[fact.fact_id for fact in facts],
+                    )
+                ],
+            )
+
+    response = AgentService(
+        profile=load_profile("data/profile.json"),
+        classifier=SynthesisClassifier(),
+        generator=GeneratorMustNotRun(),
+        rephraser=AdversarialTransformation(),
+    ).respond(message, history=[])
+
+    assert response.trace.rendering_mode == "canonical_fallback"
+    assert response.trace.transformation_outcome.startswith("rejected:")
+    assert forbidden.casefold() not in response.answer.casefold()
+    assert response.trace.final_sentence_count <= 3
+    assert response.trace.final_word_count <= 75
+
+
+def test_general_synthesis_provider_receives_only_the_planned_fact_projection() -> None:
+    class PayloadSpy:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
+
+        def generate(self, **kwargs: object) -> GeneratedResponse:
+            self.calls.append(kwargs)
+            raise GenerationUnavailableError("provider unavailable")
+
+    spy = PayloadSpy()
+    response = AgentService(
+        profile=load_profile("data/profile.json"),
+        classifier=SynthesisClassifier(),
+        generator=spy,
+    ).respond("Summarize Marco's experience.", history=[])
+
+    assert len(spy.calls) == 1
+    payload = spy.calls[0]
+    allowed_facts = payload["allowed_facts"]
+    assert isinstance(allowed_facts, list)
+    assert [fact.fact_id for fact in allowed_facts] == response.trace.selected_fact_ids
+    projected = payload["tool_result"]
+    assert isinstance(projected, ProfileSummaryPlan)
+    assert projected.fact_ids == response.trace.selected_fact_ids
+    assert "hl-stakeholder-coord" not in projected.model_dump_json()
+    assert response.trace.rendering_mode == "canonical_fallback"
+
+
+def test_general_synthesis_verifies_each_claim_against_its_own_citations() -> None:
+    class WrongSelectedCitation:
+        def generate(self, **kwargs: object) -> GeneratedResponse:
+            facts = kwargs["allowed_facts"]
+            assert isinstance(facts, list)
+            parent = next(
+                fact for fact in facts if fact.fact_id == "fact:experience:exp-global-payments"
+            )
+            text = "Marco implemented caching."
+            return GeneratedResponse(
+                text=text,
+                claims=[
+                    Claim(
+                        text=text,
+                        kind=ClaimKind.DIRECT,
+                        fact_ids=[parent.fact_id],
+                        source_ids=[parent.source_id],
+                    )
+                ],
+            )
+
+    response = AgentService(
+        profile=load_profile("data/profile.json"),
+        classifier=SynthesisClassifier(),
+        generator=WrongSelectedCitation(),
+    ).respond("Summarize Marco's experience.", history=[])
+
+    assert response.trace.rendering_mode == "canonical_fallback"
+    assert response.trace.transformation_outcome.startswith("rejected:")
+
+
+@pytest.mark.parametrize(
+    ("message", "propositions", "expected_code"),
+    [
+        (
+            "Summarize Marco's experience.",
+            (
+                (
+                    "Marco works as a Jr. .NET Developer at Global Payments.",
+                    "fact:experience:exp-global-payments",
+                ),
+                (
+                    "Marco implemented Redis and SQL caching.",
+                    "fact:experience:exp-global-payments.highlight:hl-performance",
+                ),
+                (
+                    "Marco collaborated in delivering an ISV module.",
+                    "fact:experience:exp-global-payments.highlight:hl-isv-module",
+                ),
+            ),
+            "fact_dump",
+        ),
+        (
+            "What conclusion can you draw about Marco's experience?",
+            (
+                (
+                    "Marco works as a Jr. .NET Developer at Global Payments.",
+                    "fact:experience:exp-global-payments",
+                ),
+                (
+                    "Marco implemented Redis and SQL caching.",
+                    "fact:experience:exp-global-payments.highlight:hl-performance",
+                ),
+                (
+                    "Marco resolved availability-affecting performance bottlenecks.",
+                    "fact:experience:exp-global-payments.highlight:hl-performance",
+                ),
+            ),
+            "too_many_examples",
+        ),
+    ],
+)
+def test_synthesis_rejects_uncompressed_structures(
+    message: str,
+    propositions: tuple[tuple[str, str], ...],
+    expected_code: str,
+) -> None:
+    class UncompressedTransformation:
+        def rephrase(self, **_: object) -> SynthesisTransformation:
+            typed = [
+                SynthesisProposition(text=text, fact_ids=[fact_id])
+                for text, fact_id in propositions
+            ]
+            return SynthesisTransformation(
+                text=" ".join(proposition.text for proposition in typed),
+                propositions=typed,
+            )
+
+    response = AgentService(
+        profile=load_profile("data/profile.json"),
+        classifier=SynthesisClassifier(),
+        generator=GeneratorMustNotRun(),
+        rephraser=UncompressedTransformation(),
+    ).respond(message, history=[])
+
+    assert response.trace.rendering_mode == "canonical_fallback"
+    assert response.trace.transformation_outcome == f"rejected:{expected_code}"
+
+
+@pytest.mark.parametrize(
+    ("message", "allowed_source_suffixes", "must_not_select"),
+    [
+        (
+            "What impact did Marco's security work have?",
+            ("hl-performance",),
+            ("hl-isv-module", "hl-reusable-apis"),
+        ),
+        (
+            "What impact did Marco's FAISS work have?",
+            ("sybil-hl-hybrid",),
+            ("hl-isv-module", "hl-performance", "hl-reusable-apis"),
+        ),
+    ],
+)
+def test_impact_selection_stays_inside_explicit_current_topic(
+    message: str,
+    allowed_source_suffixes: tuple[str, ...],
+    must_not_select: tuple[str, ...],
+) -> None:
+    class Outage:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def generate(self, **_: object) -> GeneratedResponse:
+            self.calls += 1
+            raise GenerationUnavailableError("provider unavailable")
+
+    outage = Outage()
+    response = AgentService(
+        profile=load_profile("data/profile.json"),
+        classifier=SynthesisClassifier(),
+        generator=outage,
+    ).respond(message, history=[])
+
+    assert response.trace.answer_mode == "synthesis"
+    assert response.trace.rendering_mode == "canonical_fallback"
+    assert response.trace.selected_source_ids
+    assert all(
+        any(source_id.endswith(suffix) for suffix in allowed_source_suffixes)
+        for source_id in response.trace.selected_source_ids
+    )
+    assert not any(
+        forbidden in source_id
+        for source_id in response.trace.selected_source_ids
+        for forbidden in must_not_select
+    )
+    if "FAISS" in message:
+        assert outage.calls == 0
+        assert response.trace.fallback_reason == "missing_explicit_impact"
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "What impact did Marco's work have?",
+        "¿Qué impacto tuvo el trabajo de Marco?",
+        "Compare Marco's projects.",
+        "Compara los proyectos de Marco.",
+    ],
+)
+def test_classifier_and_provider_outage_use_selected_canonical_fallback(message: str) -> None:
+    class SharedOutage:
+        def classify(self, message: str, history: list[object]) -> IntentDecision:
+            raise GenerationUnavailableError("provider unavailable")
+
+        def generate(self, **_: object) -> GeneratedResponse:
+            raise GenerationUnavailableError("provider unavailable")
+
+    response = AgentService(
+        profile=load_profile("data/profile.json"),
+        classifier=SharedOutage(),
+        generator=SharedOutage(),
+    ).respond(message, history=[])
+
+    assert response.answer
+    assert response.trace.answer_mode == "synthesis"
+    assert response.trace.selected_fact_ids
+    assert response.trace.rendering_mode == "canonical_fallback"
+    assert response.trace.final_sentence_count <= 3
+    assert response.trace.final_word_count <= 75
+
+
+def test_bilingual_comparison_selects_equivalent_project_scope() -> None:
+    profile = load_profile("data/profile.json")
+    planner = AnswerPlanner(profile)
+    tool_plan = summarize_profile(
+        profile,
+        SummarizeProfileArguments(audience="recruiter"),
+    )
+
+    english = planner.plan_from_tool("Compare Marco's projects.", tool_plan)
+    spanish = planner.plan_from_tool("Compara los proyectos de Marco.", tool_plan)
+
+    assert english.synthesis_dimension == spanish.synthesis_dimension == "comparison"
+    assert english.topic == spanish.topic == "projects"
+    assert english.selected_fact_ids == spanish.selected_fact_ids
+    assert english.selected_source_ids == spanish.selected_source_ids
