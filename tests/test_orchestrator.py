@@ -7,6 +7,7 @@ from src.agent.claude import UnavailableGenerator as RealUnavailableGenerator
 from src.agent.contracts import (
     Claim,
     ClaimKind,
+    ConversationState,
     GeneratedResponse,
     GenerationUnavailableError,
     Intent,
@@ -1641,3 +1642,75 @@ def test_ordinary_success_records_the_primary_selection_path() -> None:
 
     assert response.trace.selected_fact_ids
     assert response.trace.selection_path == "primary"
+
+
+def _global_payments_state() -> ConversationState:
+    """The state a prior Global Payments turn actually leaves behind."""
+    return ConversationState(
+        last_topic="experience",
+        last_source_ids=["experience:exp-global-payments"],
+        last_entities=["Global Payments (EVO Payments México)"],
+        last_tool="search_resume",
+        response_language="es",
+    )
+
+
+def test_single_unambiguous_state_entity_supplies_a_missing_date_referent() -> None:
+    """"Trabaja ahi" is answerable when verified state carries exactly one employer."""
+    service = AgentService(
+        profile=load_profile("data/profile.json"),
+        classifier=BroadSearchClassifier(),
+        generator=EmptyFactRecordingGenerator(),
+    )
+
+    response = service.respond(
+        "Desde cuando Marco trabaja ahi?",
+        history=[],
+        state=_global_payments_state(),
+    )
+
+    assert response.trace.requested_field == "start_date"
+    assert response.trace.answer_topic == "experience"
+    assert response.trace.referent_source == "state"
+    assert "2025" in response.answer
+
+
+def test_multi_entity_state_still_fails_closed_to_clarification() -> None:
+    """Ambiguous state must never be resolved by picking one of several employers."""
+    state = ConversationState(
+        last_topic="experience",
+        last_source_ids=["experience:exp-global-payments"],
+        last_entities=["Global Payments (EVO Payments México)", "Sybil"],
+    )
+    service = AgentService(
+        profile=load_profile("data/profile.json"),
+        classifier=BroadSearchClassifier(),
+        generator=EmptyFactRecordingGenerator(),
+    )
+
+    response = service.respond("Desde cuando Marco trabaja ahi?", history=[], state=state)
+
+    assert response.trace.rendering_mode == "clarification"
+    assert response.trace.referent_source is None
+
+
+def test_an_explicit_message_entity_outranks_conversation_state() -> None:
+    """History can supply a missing referent, never replace one the message states."""
+    state = ConversationState(
+        last_topic="projects",
+        last_source_ids=["projects:sybil"],
+        last_entities=["Sybil"],
+    )
+    service = AgentService(
+        profile=load_profile("data/profile.json"),
+        classifier=BroadSearchClassifier(),
+        generator=EmptyFactRecordingGenerator(),
+    )
+
+    response = service.respond(
+        "¿Desde cuándo trabaja Marco en Global Payments?", history=[], state=state
+    )
+
+    assert response.trace.requested_field == "start_date"
+    assert response.trace.referent_source == "message"
+    assert "2025" in response.answer

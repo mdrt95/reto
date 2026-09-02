@@ -275,6 +275,13 @@ class AgentService:
             )
 
         explicit_plan = self._answer_planner.explicit_direct_plan(message)
+        referent_source: Literal["message", "state"] | None = (
+            "message" if explicit_plan is not None else None
+        )
+        if explicit_plan is None:
+            state_plan = self._answer_planner.explicit_direct_plan(message, state)
+            if state_plan is not None:
+                explicit_plan, referent_source = state_plan, "state"
         follow_up = None if explicit_plan is not None else self._follow_up_plan(message, state, history)
         if follow_up == "clarify":
             language = detect_response_language(message)
@@ -328,12 +335,14 @@ class AgentService:
                     raise
                 decision = IntentDecision(intent=Intent.FOLLOW_UP, confidence=1.0)
         if explicit_plan is not None:
-            return self._direct_plan_response(
+            explicit_response = self._direct_plan_response(
                 plan=explicit_plan,
                 decision=decision,
                 message=message,
                 fallback_reason=fallback_reason,
             )
+            explicit_response.trace.referent_source = referent_source
+            return explicit_response
         if decision.intent in {Intent.OUT_OF_SCOPE, Intent.ADVERSARIAL}:
             language = detect_response_language(message)
             answer = (

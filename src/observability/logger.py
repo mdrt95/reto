@@ -25,6 +25,7 @@ class TurnLogEvent(BaseModel):
     fallback_reason: str | None = None
     generator_skipped: bool = False
     selection_path: str | None = None
+    referent_source: str | None = None
     answer_mode: str | None = None
     rendering_mode: str | None = None
     synthesis_dimension: str | None = None
