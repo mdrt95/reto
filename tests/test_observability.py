@@ -38,11 +38,13 @@ def test_turn_event_serializes_fallback_reason_without_content_fields() -> None:
         guardrail_output="pass",
         grounding_status="tool_fallback",
         fallback_reason="generator_truncated",
+        informativeness_outcome="fallback",
         latency_total_ms=10,
     )
 
     payload = json.loads(event.model_dump_json())
 
     assert payload["fallback_reason"] == "generator_truncated"
+    assert payload["informativeness_outcome"] == "fallback"
     assert "message" not in payload
     assert "answer" not in payload

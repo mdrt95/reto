@@ -2,6 +2,7 @@
 
 import logging
 from datetime import UTC, datetime
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -27,6 +28,7 @@ class TurnLogEvent(BaseModel):
     selection_path: str | None = None
     referent_source: str | None = None
     referent_correction: bool = False
+    informativeness_outcome: Literal["pass", "fallback"] | None = None
     answer_mode: str | None = None
     rendering_mode: str | None = None
     synthesis_dimension: str | None = None

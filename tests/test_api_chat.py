@@ -53,6 +53,37 @@ def test_chat_returns_the_stable_public_contract(chat_client: TestClient) -> Non
     assert "trace" not in body
 
 
+def test_chat_logs_the_informativeness_outcome_without_exposing_the_trace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The private delivery-floor outcome must reach content-free observability."""
+    events: list[object] = []
+
+    class InformativenessFallbackAgent:
+        def respond(self, message: str, *, history: list[object]) -> AgentResponse:
+            return AgentResponse(
+                answer="Please ask about the profile section where that item appears.",
+                trace=AgentTrace(
+                    informativeness_outcome="fallback",
+                    rendering_mode="informativeness_fallback",
+                ),
+            )
+
+    monkeypatch.setattr("src.api.chat.log_turn", events.append)
+    settings = Settings(environment="test", profile_path="data/profile.json")
+    with TestClient(
+        create_app(settings, agent_service=InformativenessFallbackAgent())
+    ) as client:
+        response = client.post("/api/chat", json={"message": "Tell me more."})
+
+    assert response.status_code == 200
+    assert len(events) == 1
+    event = events[0]
+    assert getattr(event, "informativeness_outcome") == "fallback"
+    assert getattr(event, "rendering_mode") == "informativeness_fallback"
+    assert "trace" not in response.json()
+
+
 def test_chat_accepts_and_returns_optional_conversation_state() -> None:
     """State extension stays optional and preserves the original request contract."""
     from src.agent.contracts import ConversationState

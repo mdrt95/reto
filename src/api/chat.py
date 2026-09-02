@@ -183,6 +183,7 @@ def chat(payload: ChatRequest, request: Request) -> ChatResponse:
             selection_path=result.trace.selection_path,
             referent_source=result.trace.referent_source,
             referent_correction=result.trace.referent_correction,
+            informativeness_outcome=result.trace.informativeness_outcome,
             answer_mode=result.trace.answer_mode,
             rendering_mode=result.trace.rendering_mode,
             synthesis_dimension=result.trace.synthesis_dimension,

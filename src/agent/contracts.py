@@ -204,6 +204,8 @@ class AgentTrace(BaseModel):
     referent_source: Literal["message", "state"] | None = None
     referent_correction: bool = False
     """Whether the answer corrected a false claim about what was already said."""
+    informativeness_outcome: Literal["pass", "fallback"] | None = None
+    """Whether the final answer passed the standalone-fact informativeness floor."""
     answer_mode: str | None = None
     rendering_mode: str | None = None
     answer_topic: str | None = None

@@ -33,7 +33,13 @@ from src.models.profile import load_profile
 # reconstructed from canonical profile facts. `transformed` is the only mode whose
 # wording the provider chose, so it is the only mode an inference can reach.
 DETERMINISTIC_RENDERING_MODES = frozenset(
-    {"canonical", "canonical_fallback", "canonical_not_found", "clarification"}
+    {
+        "canonical",
+        "canonical_fallback",
+        "canonical_not_found",
+        "clarification",
+        "informativeness_fallback",
+    }
 )
 
 # Coarse classifier fields that must lose to explicit evidence in the current message.
@@ -338,6 +344,7 @@ def execute_scenarios(
                 "answer_mode": response.trace.answer_mode,
                 "rendering_mode": response.trace.rendering_mode,
                 "grounding_status": response.trace.grounding_status,
+                "informativeness_outcome": response.trace.informativeness_outcome,
                 "selected_fact_ids": response.trace.selected_fact_ids,
                 "latency_ms": round((perf_counter() - started_at) * 1_000),
             }

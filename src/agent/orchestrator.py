@@ -81,6 +81,19 @@ def _referent_correction(language: Literal["en", "es"]) -> str:
     )
 
 
+def _unnarrated_fact_fallback(fact: ResumeFact, language: Literal["en", "es"]) -> str:
+    """Explain honestly why one profile index term cannot stand as a complete answer."""
+    if language == "es":
+        return (
+            f'El perfil incluye "{fact.text}", pero ese elemento por sí solo no aporta '
+            "una respuesta completa. Pregunta por la sección del perfil donde aparece."
+        )
+    return (
+        f'The profile lists "{fact.text}", but that item alone does not provide a '
+        "complete answer. Please ask about the profile section where it appears."
+    )
+
+
 def _bounded(values: list[str], limit: int) -> list[str]:
     """Deduplicate oldest-first and keep the most recent entries within the cap."""
     return list(dict.fromkeys(values))[-limit:]
@@ -268,6 +281,7 @@ class AgentService:
     ) -> AgentResponse:
         """Answer one turn and record which selection path produced the answer."""
         response = self._respond(message, history=history, state=state)
+        self._apply_informativeness_floor(response, message)
         if response.trace.selection_path is None and response.trace.guardrail_input != "blocked":
             # Recovery marks itself; everything else that reached fact selection is
             # ordinary success or an explicit empty selection, never folded together.
@@ -287,12 +301,63 @@ class AgentService:
                 f"{response.answer}"
             )
             response.trace.referent_correction = True
+        if (
+            response.trace.final_word_count is not None
+            or response.trace.informativeness_outcome == "fallback"
+        ):
+            response.trace.final_word_count = len(response.answer.split())
+        if (
+            response.trace.final_sentence_count is not None
+            or response.trace.informativeness_outcome == "fallback"
+        ):
+            response.trace.final_sentence_count = count_sentences(response.answer)
         response.state = self._accumulate_discourse(
             previous=state,
             current=response.state,
             trace=response.trace,
         )
         return response
+
+    def _apply_informativeness_floor(
+        self,
+        response: AgentResponse,
+        message: str,
+    ) -> None:
+        """Prevent a raw catalog index term from becoming an entire public answer."""
+        response.trace.informativeness_outcome = "pass"
+        visible_answer = re.sub(
+            r"\[([^\]]+)\]\((?:https?://)[^)\s]+\)",
+            r"\1",
+            response.answer,
+        )
+        normalized_answer = normalize_resume_text(visible_answer)
+        if not normalized_answer:
+            return
+
+        selected_fact_ids = set(response.trace.selected_fact_ids)
+        for fact in build_resume_fact_catalog(self._profile):
+            if (
+                fact.fact_id in selected_fact_ids
+                and fact.narrative_en is None
+                and fact.narrative_es is None
+                and normalized_answer == normalize_resume_text(fact.text)
+            ):
+                response.answer = _unnarrated_fact_fallback(
+                    fact,
+                    detect_response_language(message),
+                )
+                response.trace.informativeness_outcome = "fallback"
+                response.trace.rendering_mode = "informativeness_fallback"
+                response.trace.grounding_status = "fact_rendered"
+                response.trace.answer_topic = fact.topic
+                response.trace.selected_fact_ids = [fact.fact_id]
+                response.trace.selected_source_ids = [fact.source_id]
+                response.trace.claim_source_ids = [fact.source_id]
+                if response.state is not None:
+                    response.state.last_topic = fact.topic
+                    response.state.last_source_ids = [fact.source_id]
+                    response.state.last_entities = [fact.entity] if fact.entity else []
+                return
 
     def _accumulate_discourse(
         self,

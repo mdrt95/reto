@@ -6,6 +6,8 @@ from pydantic import ValidationError
 from src.agent.claude import UnavailableClassifier
 from src.agent.claude import UnavailableGenerator as RealUnavailableGenerator
 from src.agent.contracts import (
+    AgentResponse,
+    AgentTrace,
     Claim,
     ClaimKind,
     ConversationState,
@@ -20,6 +22,7 @@ from src.agent.contracts import (
     SynthesisTransformation,
 )
 from src.agent.orchestrator import AgentService
+from src.agent.rephrase import count_sentences
 from src.models.profile import load_profile
 from src.tools.profile_tools import (
     ExperienceFilterResult,
@@ -144,6 +147,166 @@ class GroundedClaimWithUnclaimedTextGenerator:
                 )
             ],
         )
+
+
+@pytest.mark.parametrize(
+    ("message", "candidate", "selected_fact_count", "language_marker"),
+    [
+        ("Tell me more about Sybil.", "SQLite FTS5", 1, "profile"),
+        (
+            "Tell me more about the part where it says SQLite FTS5.",
+            "**SQLite FTS5.**",
+            2,
+            "profile",
+        ),
+        (
+            "Tell me more about Sybil.",
+            "[SQLite FTS5](https://example.com/fts5)",
+            1,
+            "profile",
+        ),
+        ("Dime más sobre Sybil.", "`SQLite FTS5`", 1, "perfil"),
+    ],
+)
+def test_standalone_unnarrated_fact_is_replaced_before_delivery(
+    monkeypatch: pytest.MonkeyPatch,
+    message: str,
+    candidate: str,
+    selected_fact_count: int,
+    language_marker: str,
+) -> None:
+    """A raw index term is selection evidence, not a complete standalone answer."""
+    profile = load_profile("data/profile.json")
+    catalog = build_resume_fact_catalog(profile)
+    bare_fact = next(
+        fact
+        for fact in catalog
+        if fact.text == "SQLite FTS5"
+        and fact.narrative_en is None
+        and fact.narrative_es is None
+    )
+    selected = [bare_fact]
+    if selected_fact_count == 2:
+        selected.append(next(fact for fact in catalog if fact.narrative_en is not None))
+    service = AgentService(
+        profile=profile,
+        classifier=SecurityClassifier(),
+        generator=RealUnavailableGenerator(),
+    )
+    monkeypatch.setattr(
+        service,
+        "_respond",
+        lambda *_args, **_kwargs: AgentResponse(
+            answer=candidate,
+            trace=AgentTrace(
+                rendering_mode="canonical",
+                selected_fact_ids=[fact.fact_id for fact in selected],
+                selected_source_ids=[fact.source_id for fact in selected],
+            ),
+            state=ConversationState(
+                last_topic="projects",
+                last_source_ids=[fact.source_id for fact in selected],
+            ),
+        ),
+    )
+
+    response = service.respond(message, history=[])
+
+    assert response.answer != candidate
+    assert bare_fact.text in response.answer
+    assert language_marker in response.answer.casefold()
+    assert response.trace.informativeness_outcome == "fallback"
+    assert response.trace.rendering_mode == "informativeness_fallback"
+    assert response.trace.selected_fact_ids == [bare_fact.fact_id]
+    assert response.trace.selected_source_ids == [bare_fact.source_id]
+    assert response.trace.claim_source_ids == [bare_fact.source_id]
+    assert response.trace.final_word_count == len(response.answer.split())
+    assert response.state is not None
+    assert response.state.last_topic == bare_fact.topic
+    assert response.state.last_source_ids == [bare_fact.source_id]
+    assert response.state.delivered_fact_ids == [bare_fact.fact_id]
+
+
+def test_unnarrated_fact_inside_a_labeled_list_is_delivered_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Index terms remain valid list items when a deterministic heading gives context."""
+    profile = load_profile("data/profile.json")
+    bare_fact = next(
+        fact
+        for fact in build_resume_fact_catalog(profile)
+        if fact.text == "SQLite FTS5"
+        and fact.narrative_en is None
+        and fact.narrative_es is None
+    )
+    candidate = "Skills from the profile:\n- SQLite FTS5"
+    service = AgentService(
+        profile=profile,
+        classifier=SecurityClassifier(),
+        generator=RealUnavailableGenerator(),
+    )
+    monkeypatch.setattr(
+        service,
+        "_respond",
+        lambda *_args, **_kwargs: AgentResponse(
+            answer=candidate,
+            trace=AgentTrace(
+                grounding_status="list_rendered",
+                rendering_mode="canonical",
+                selected_fact_ids=[bare_fact.fact_id],
+                selected_source_ids=[bare_fact.source_id],
+            ),
+        ),
+    )
+
+    response = service.respond("What are Marco's skills?", history=[])
+
+    assert response.answer == candidate
+    assert response.trace.informativeness_outcome == "pass"
+    assert response.trace.rendering_mode == "canonical"
+
+
+def test_referent_correction_recounts_an_existing_final_size(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Final size metadata must describe the prefixed text that is actually delivered."""
+    profile = load_profile("data/profile.json")
+    fact = next(
+        fact
+        for fact in build_resume_fact_catalog(profile)
+        if fact.source_id == "experience:exp-global-payments"
+    )
+    candidate = fact_display_text(fact, "en")
+    service = AgentService(
+        profile=profile,
+        classifier=SecurityClassifier(),
+        generator=RealUnavailableGenerator(),
+    )
+    monkeypatch.setattr(
+        service,
+        "_respond",
+        lambda *_args, **_kwargs: AgentResponse(
+            answer=candidate,
+            trace=AgentTrace(
+                rendering_mode="transformed",
+                selected_fact_ids=[fact.fact_id],
+                selected_source_ids=[fact.source_id],
+                final_word_count=len(candidate.split()),
+                final_sentence_count=1,
+            ),
+        ),
+    )
+
+    response = service.respond(
+        "Tell me more about the part where it says he worked at Global Payments.",
+        history=[],
+    )
+
+    assert response.trace.referent_correction is True
+    assert response.trace.informativeness_outcome == "pass"
+    assert response.trace.final_word_count == len(response.answer.split())
+    assert response.trace.final_sentence_count == count_sentences(response.answer)
+    assert response.trace.final_word_count > len(candidate.split())
 
 
 class ContradictoryFactIdGenerator:
@@ -1219,6 +1382,7 @@ def test_skills_query_in_spanish_is_rendered_deterministically_without_generatio
     assert response.trace.grounding_status == "list_rendered"
     assert response.trace.answer_mode == "direct"
     assert response.trace.rendering_mode == "canonical"
+    assert response.trace.informativeness_outcome == "pass"
     assert response.trace.requested_field == "skills"
     assert response.trace.selected_fact_ids
     assert response.answer.startswith("Lenguajes y habilidades del perfil:")
