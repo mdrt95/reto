@@ -81,6 +81,16 @@ _EXPLICIT_OUTCOME_MARKERS = (
     "antes de", "superando", "resolviendo", "reduciendo", "mejorar", "permitiendo",
 )
 
+# A cross-cutting domain theme (D-043). The vocabulary that decides which facts belong
+# to the theme is derived from the profile's own "AI/LLM" skill categories rather than
+# hardcoded; only the message-side trigger tokens are spelled out here, and "ia" is the
+# Spanish acronym so the English and Spanish phrasings resolve alike (D-036).
+_DOMAIN_MESSAGE_TOKENS: dict[str, frozenset[str]] = {
+    "ai": frozenset({"ai", "ia"}),
+}
+_DOMAIN_KEYWORD_HITS_REQUIRED = 2
+_DOMAIN_TOPICS: frozenset[ResumeTopic] = frozenset({"projects", "experience"})
+
 
 class AnswerPlanner:
     """Select the smallest canonical fact set and its typed answer contract."""
@@ -244,6 +254,15 @@ class AnswerPlanner:
                     language=language,
                     facts=[fact],
                 )
+
+        # Last: a cross-cutting domain theme ("AI") with no explicit topic, tag, or
+        # technology anchor. This is the only direct branch permitted to span topics
+        # (D-043); every narrower, single-topic question was already answered above.
+        domain = self.named_domain(message)
+        if domain is not None:
+            domain_plan = self._domain_theme_plan(domain, language)
+            if domain_plan is not None:
+                return domain_plan
         return None
 
     def plan_from_tool(
@@ -424,6 +443,15 @@ class AnswerPlanner:
         ]
         named_technology = self.named_technology(message)
         tag = self.profile_tag_match(message)
+        # A domain-theme summary may span topics only when the message did not itself
+        # name a single topic. "Summarize which projects used AI" stays a projects
+        # question; "Summarize his AI experience" is the theme.
+        domain = (
+            self.named_domain(message)
+            if dimension == "summary" and "project" not in normalized_tokens
+            else None
+        )
+        domain_facts = self._domain_theme_facts(domain) if domain is not None else []
         explicitly_scoped = False
         if named_technology is not None:
             normalized_technology = normalize_resume_text(named_technology)
@@ -459,6 +487,13 @@ class AnswerPlanner:
                 candidates = tool_facts or topic_facts
         elif tag is not None and tool_facts:
             candidates = tool_facts
+            explicitly_scoped = True
+        elif domain_facts:
+            # A domain-theme summary ("summarize his AI experience") may draw on the
+            # project and experience topics together (D-043). `topic` stays the scalar
+            # primary the classifier and scenarios assert; `_plan` widens
+            # `evidence_topics` from the facts actually selected.
+            candidates = domain_facts
             explicitly_scoped = True
         else:
             candidates = topic_facts or tool_facts
@@ -673,6 +708,86 @@ class AnswerPlanner:
             facts=[],
         )
 
+    def named_domain(self, message: str) -> str | None:
+        """Return the profile-derived domain theme named in the message, or None.
+
+        A domain is broader than a single technology: "AI" is not one FAISS-style
+        entry, it is the theme spanning Marco's RAG project and his multi-agent
+        engineering work. A domain question may draw evidence from more than one
+        topic (D-043); a specific-technology question never does.
+        """
+        tokens = set(normalize_resume_text(message).split())
+        for domain, message_tokens in _DOMAIN_MESSAGE_TOKENS.items():
+            if tokens & message_tokens:
+                return domain
+        return None
+
+    def _domain_vocabulary(self, domain: str) -> frozenset[str]:
+        """Build a domain's keyword vocabulary from the profile's skill categories."""
+        skills = self._profile.skills.model_dump()
+        values: list[str] = []
+        for category, entries in skills.items():
+            if domain in normalize_resume_text(category).split():
+                values.extend(entries)
+        return frozenset(
+            {domain, *normalize_resume_text(" ".join(values)).split()}
+        )
+
+    def _domain_theme_facts(self, domain: str) -> list[ResumeFact]:
+        """Return one representative work fact per record in the named domain.
+
+        The match surface is `keywords` and `entity` — the structured, reviewed
+        signal, not free prose — and a fact must share at least two vocabulary
+        tokens so a single generic word ("APIs") cannot pull an unrelated
+        highlight into an AI answer. Each record is then collapsed to its
+        highest-ranked matching fact, so a project contributes its overview
+        rather than several of its own highlights and the small cross-topic
+        budget is not spent entirely inside one record.
+        """
+        vocabulary = self._domain_vocabulary(domain)
+        matched: list[ResumeFact] = []
+        for fact in build_resume_fact_catalog(self._profile):
+            if fact.topic not in _DOMAIN_TOPICS or fact.field_name is not None:
+                continue
+            fact_tokens = set(
+                normalize_resume_text(
+                    " ".join([*fact.keywords, fact.entity or ""])
+                ).split()
+            )
+            if len(fact_tokens & vocabulary) >= _DOMAIN_KEYWORD_HITS_REQUIRED:
+                matched.append(fact)
+        ranked = sorted(
+            matched,
+            key=lambda fact: (-self._synthesis_rank(fact, "summary"), fact.fact_id),
+        )
+        by_root: dict[str, ResumeFact] = {}
+        for fact in ranked:
+            by_root.setdefault(fact.source_id.split(".highlight:", 1)[0], fact)
+        return list(by_root.values())
+
+    def _domain_theme_plan(
+        self,
+        domain: str,
+        language: Literal["en", "es"],
+    ) -> AnswerPlan | None:
+        """Select a small, cross-topic fact set for a domain-theme question."""
+        facts = self._domain_theme_facts(domain)
+        if not facts:
+            return None
+        limit = MAX_SYNTHESIS_FACTS_BY_LANGUAGE[language]
+        selected = facts[:limit]
+        topic_counts = Counter(fact.topic for fact in selected)
+        dominant = topic_counts.most_common(1)[0][0]
+        return self._plan(
+            mode=AnswerMode.DIRECT,
+            topic=dominant,
+            scope="project" if dominant == "projects" else "employment",
+            requested_field="technology",
+            language=language,
+            facts=selected,
+            evidence_topics=sorted(topic_counts),
+        )
+
     def named_technology(self, message: str) -> str | None:
         """Return the longest profile-defined technology named in the message."""
         normalized_message = normalize_resume_text(message)
@@ -728,8 +843,10 @@ class AnswerPlanner:
         language: Literal["en", "es"],
         facts: list[ResumeFact],
         synthesis_dimension: SynthesisDimension | None = None,
+        evidence_topics: list[ResumeTopic] | None = None,
     ) -> AnswerPlan:
         unique_facts = list({fact.fact_id: fact for fact in facts}.values())
+        spanned = evidence_topics or sorted({fact.topic for fact in unique_facts})
         return AnswerPlan(
             mode=mode,
             topic=topic,
@@ -737,6 +854,7 @@ class AnswerPlanner:
             requested_field=requested_field,
             language=language,
             synthesis_dimension=synthesis_dimension,
+            evidence_topics=spanned or [topic],
             selected_fact_ids=[fact.fact_id for fact in unique_facts],
             selected_source_ids=list(dict.fromkeys(fact.source_id for fact in unique_facts)),
         )
@@ -879,6 +997,7 @@ def plan_trace_fields(plan: AnswerPlan, rendering_mode: str) -> dict[str, object
         "answer_mode": plan.mode.value,
         "rendering_mode": rendering_mode,
         "answer_topic": plan.topic,
+        "evidence_topics": plan.evidence_topics or [plan.topic],
         "answer_scope": plan.scope,
         "requested_field": plan.requested_field,
         "synthesis_dimension": plan.synthesis_dimension,

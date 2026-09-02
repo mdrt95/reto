@@ -218,6 +218,7 @@ def test_standalone_unnarrated_fact_is_replaced_before_delivery(
     assert response.trace.informativeness_outcome == "fallback"
     assert response.trace.rendering_mode == "informativeness_fallback"
     assert response.trace.selected_fact_ids == [bare_fact.fact_id]
+    assert response.trace.evidence_topics == [bare_fact.topic]
     assert response.trace.selected_source_ids == [bare_fact.source_id]
     assert response.trace.claim_source_ids == [bare_fact.source_id]
     assert response.trace.final_word_count == len(response.answer.split())

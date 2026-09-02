@@ -719,3 +719,70 @@ the authoritative foundation for both continuity and non-repetition.
 even though some phrases also remain broad conclusion markers for standalone questions.
 The orchestrator pins these focused searches to the single fact returned by the tool;
 explicit transformations still use the ordinary synthesis path outside this route.
+
+## D-044: A domain theme may span topics; a single-field question never does; `AnswerPlan.topic` stays scalar
+
+**Status:** Accepted (extends D-032/D-037 rather than reversing them)
+
+Topic was a hard pre-filter applied before ranking, in both `search_resume`
+(`candidates = [fact for fact in catalog if fact.topic == topic]`) and
+`AnswerPlanner._synthesis_selection`. Facts outside the resolved topic were therefore
+unreachable, not merely unranked. "What is his AI experience?" resolves
+`topic="experience"`, so Sybil (`topic="projects"`) could not appear in the answer even
+though it is Marco's most substantial AI work; the multi-agent ISV engineering highlight
+(`topic="experience"`) and Sybil could never be delivered together.
+
+A cross-cutting **domain theme** is now allowed to draw evidence from the `projects` and
+`experience` topics at once. The AI domain's vocabulary is derived from the profile's own
+`ai_llm` and `ai_stack` skill categories (D-020), not a hardcoded list; a work fact joins
+the domain when its curated `keywords`/`entity` tokens — the reviewed structured signal,
+not free prose — share at least two vocabulary tokens, and each record is collapsed to its
+highest-ranked matching fact so a project contributes one overview rather than a run of
+its own highlights. `AnswerPlanner.named_domain` recognises the theme; `named_technology`
+is unchanged and still resolves a specific technology (FAISS) to the one place it appears.
+
+**Which questions may span, and which never do:**
+
+- `summary` with a named domain and no explicit single topic — may span.
+- a bare domain-theme question with no topic, tag, or technology anchor
+  (`explicit_direct_plan`'s last branch) — may span.
+- a question that explicitly names the `projects` topic ("which projects used AI") — does
+  **not** span; it stays a projects question.
+- `start_date`, `end_date`, `current` — never span; one employment record answers them.
+- a specific `technology` or `tag` — never spans by substitution. It stays scoped because
+  the term matches one place; if the same term genuinely appears under two topics, every
+  matching fact is kept rather than one topic discarded, but no non-matching fact is added.
+
+**Reconciliation with the scoping gates.** D-032/D-037 forbid a parent, sibling, or
+unrelated fact standing in for the required evidence, and forbid an employer-only
+projection unless employers were requested. Spanning selects only facts that genuinely
+carry the requested theme; a second-topic fact that names the domain is not an unrelated
+extra. The release gates are preserved: FAISS still reaches exactly
+`project:proj-sybil.highlight:sybil-hl-hybrid`, and no date or field question spans.
+
+**`AnswerPlan.topic` stays scalar** — the dominant topic (most selected facts, ties by
+deterministic order). A new `AnswerPlan.evidence_topics: list[AnswerTopic]` defaults to
+`[topic]` and lists every topic the selected facts belong to, sorted; only a spanning
+answer carries more than one entry. `AgentTrace` and `TurnLogEvent` gained the same
+field, `plan_trace_fields` projects it, the informativeness floor narrows it to the one
+delivered fact's topic, and `_accumulate_discourse` folds every entry into
+`discussed_topics`. `answer_topic` in the trace and `expected_topic` across the 26 topic
+assertions, the 25 `eval/scenarios.json` entries, and the paraphrase families keep
+asserting the scalar and are unchanged.
+
+**Why:** making `topic` itself plural is a contract change with roughly fifty downstream
+expectations and answers a question the issue did not ask. A separate `evidence_topics`
+records the breadth without disturbing the primary. Recognising the domain through a
+dedicated `named_domain` rather than widening `named_technology` keeps "names one specific
+technology" (D-032) and "names a whole domain" as distinct, separately testable signals —
+"AI" is not a profile technology value, and Sybil's project-level fact contains no "AI"
+token at all, so overloading `named_technology` could not have reached it without a
+second, riskier loosening of fact matching.
+
+**Consequence:** "What is his AI experience?" returns `project:proj-sybil` and
+`experience:exp-global-payments.highlight:hl-isv-module` with `topic="projects"` and
+`evidence_topics=["experience", "projects"]`. "Summarize his AI experience." spans with
+`topic="experience"`. "Summarize Marco's experience." with no domain word is unchanged and
+stays within `experience`. The frontend's suggested question changes from "Which projects
+used AI or data platforms?" to "What is his AI experience?". No public request or response
+schema changed.

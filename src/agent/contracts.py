@@ -127,6 +127,12 @@ class AnswerPlan(BaseModel):
     requested_field: RequestedField
     language: Literal["en", "es"]
     synthesis_dimension: SynthesisDimension | None = None
+    evidence_topics: list[AnswerTopic] = Field(default_factory=list)
+    """Every topic the selected facts belong to, sorted; `[topic]` when not spanning.
+
+    `topic` stays the scalar primary. Only a theme question that genuinely draws on
+    more than one topic (D-043) reports more than one entry here.
+    """
     selected_fact_ids: list[str] = Field(default_factory=list)
     selected_source_ids: list[str] = Field(default_factory=list)
 
@@ -209,6 +215,8 @@ class AgentTrace(BaseModel):
     answer_mode: str | None = None
     rendering_mode: str | None = None
     answer_topic: str | None = None
+    evidence_topics: list[str] = Field(default_factory=list)
+    """Every topic the delivered facts came from; `[answer_topic]` unless it spanned."""
     answer_scope: str | None = None
     requested_field: str | None = None
     selected_fact_ids: list[str] = Field(default_factory=list)

@@ -84,6 +84,31 @@ def test_chat_logs_the_informativeness_outcome_without_exposing_the_trace(
     assert "trace" not in response.json()
 
 
+def test_chat_logs_the_evidence_topics_a_spanning_answer_drew_on(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A theme answer that spans topics reports every one to content-free logging."""
+    events: list[object] = []
+
+    class SpanningAgent:
+        def respond(self, message: str, *, history: list[object]) -> AgentResponse:
+            return AgentResponse(
+                answer="Sybil and the multi-agent ISV work.",
+                trace=AgentTrace(
+                    answer_topic="projects",
+                    evidence_topics=["experience", "projects"],
+                ),
+            )
+
+    monkeypatch.setattr("src.api.chat.log_turn", events.append)
+    settings = Settings(environment="test", profile_path="data/profile.json")
+    with TestClient(create_app(settings, agent_service=SpanningAgent())) as client:
+        response = client.post("/api/chat", json={"message": "What is his AI experience?"})
+
+    assert response.status_code == 200
+    assert getattr(events[0], "evidence_topics") == ["experience", "projects"]
+
+
 def test_chat_accepts_and_returns_optional_conversation_state() -> None:
     """State extension stays optional and preserves the original request contract."""
     from src.agent.contracts import ConversationState

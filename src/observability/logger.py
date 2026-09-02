@@ -31,6 +31,7 @@ class TurnLogEvent(BaseModel):
     informativeness_outcome: Literal["pass", "fallback"] | None = None
     answer_mode: str | None = None
     rendering_mode: str | None = None
+    evidence_topics: list[str] = Field(default_factory=list)
     synthesis_dimension: str | None = None
     transformation_outcome: str | None = None
     final_word_count: int | None = None

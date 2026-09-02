@@ -186,6 +186,7 @@ def chat(payload: ChatRequest, request: Request) -> ChatResponse:
             informativeness_outcome=result.trace.informativeness_outcome,
             answer_mode=result.trace.answer_mode,
             rendering_mode=result.trace.rendering_mode,
+            evidence_topics=result.trace.evidence_topics,
             synthesis_dimension=result.trace.synthesis_dimension,
             transformation_outcome=result.trace.transformation_outcome,
             final_word_count=result.trace.final_word_count,
