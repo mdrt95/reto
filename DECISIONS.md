@@ -375,3 +375,34 @@ Explicit summary, impact, significance, comparison, explanation, and conclusion/
 **Why:** The prior fact-scaled rephrase budget and one-sentence-per-fact prompt made a five-fact selection become a five-paragraph answer. Selection grounding prevented unrelated IDs but did not ensure the prose answered the requested dimension, and the fallback repeated all selected narratives. Planning the transformation boundary before provider access makes concision and evidence scope enforceable properties rather than prompt preferences.
 
 **Consequence:** Synthesis traces and content-free turn logs record the dimension, `transformed` versus `canonical_fallback`, transformation outcome/reason, selected IDs/counts, and final word/sentence counts. Legacy generator responses that cite only source IDs are no longer accepted as synthesis: every factual proposition must carry selected fact IDs or the service uses the canonical fallback. The focused contract covers five required EN/ES examples and one shared outage/rejection boundary; Issue #3 retains cross-scenario evaluation and the real UI release gate.
+
+## D-035: Announce a fallback only when it renders a list of facts
+
+**Status:** Accepted (amends D-024)
+
+`_FALLBACK_NOTICE` is no longer prefixed to the synthesis canonical fallback
+(`AgentService._synthesis_response`). It remains on the two multi-fact fallback paths:
+`_fact_selection_response`'s ungrounded branch and `_tool_fallback_response`.
+
+The synthesis fallback renders exactly one human-reviewed narrative through
+`SynthesisFallbackRenderer`, bounded to three sentences and 75 words. Removing the
+notice also returns those words to the body, which the notice's own length had been
+subtracted from. The other two paths join several facts — a `- ` bullet list for
+`ProfileSummaryPlan`, blank-line-separated records otherwise — and keep the notice.
+`rendering_mode` still records `canonical_fallback`, and `transformation_outcome`
+still records why, so no diagnostic information is lost.
+
+**Why:** D-024 added the notice after a live turn in which canned
+`role at company` / `team_context` text was mistaken for a real summary. D-029 then
+made human-reviewed bilingual narratives the rendering floor, so the synthesis
+fallback no longer emits the kind of output that motivated the warning: it emits
+prose. Prefixing an apology to a correct, idiomatic answer misreports it as a
+failure, and did so on every Spanish summary and impact question, where synthesis
+falls back more often than in English. A list of facts still reads as raw material
+rather than an answer, so D-024's reasoning continues to hold there.
+
+**Consequence:** In practice the notice now appears rarely, because the synthesis
+planner intercepts most requests that previously reached the multi-fact paths. That
+is intended: the notice marks a specific output shape, not a fallback in general.
+Bilingual boundary coverage is unaffected — the out-of-scope redirect, clarification,
+not-found, input-guard, and output-guard replies remain bilingual and tested.

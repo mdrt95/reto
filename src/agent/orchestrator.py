@@ -1015,14 +1015,15 @@ class AgentService:
                 if transformation_outcome.startswith("rejected") and self._rephraser is not None
                 else "tool_fallback"
             )
-            notice = _FALLBACK_NOTICE[answer_plan.language]
-            body = self._synthesis_fallback_renderer.render(
-                answer_plan,
-                max_words=75 - len(notice.split()),
-            )
+            # No fallback notice here (D-024, amended): the other two fallback paths
+            # emit a bullet list of facts that a reader could mistake for a composed
+            # answer, but this one renders a single human-reviewed narrative that is
+            # already prose. Announcing it degrades a correct answer, and the trace
+            # still records `canonical_fallback` for anyone who needs the distinction.
+            body = self._synthesis_fallback_renderer.render(answer_plan)
             if not body:
                 return None
-            answer = f"{notice}\n{body}"
+            answer = body
 
         output_result = evaluate_output(answer, self._profile)
         if not output_result.allowed:

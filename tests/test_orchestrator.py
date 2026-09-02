@@ -353,10 +353,7 @@ def test_open_filter_synthesis_falls_back_to_verified_tool_facts() -> None:
 
     assert response.trace.tool_name == "filter_experience"
     assert response.trace.grounding_status == "tool_fallback"
-    assert response.answer.startswith(
-        "I couldn't compose a written answer right now, so here are the verified "
-        "profile facts instead:"
-    )
+    assert not response.answer.startswith("I couldn't compose")
     assert "security" in response.answer.casefold()
     assert "Google" not in response.answer
     assert "experience:exp-global-payments.highlight:hl-security-console" in (
@@ -528,18 +525,18 @@ def test_summary_uses_exact_tool_facts_when_generation_is_unavailable() -> None:
     assert response.trace.answer_mode == "synthesis"
     assert response.trace.rendering_mode == "canonical_fallback"
     assert response.trace.selected_fact_ids
-    assert response.answer.startswith(
-        "I couldn't compose a written answer right now, so here are the verified "
-        "profile facts instead:"
-    )
+    # A single reviewed narrative is prose, not a list of facts, so it carries no
+    # apology; the trace still records that this turn fell back (D-024).
+    assert not response.answer.startswith("I couldn't compose")
+    assert response.trace.rendering_mode == "canonical_fallback"
     assert "Jr. .NET Developer (Full-Stack)" in response.answer
     assert "Global Payments (EVO Payments México)" in response.answer
     assert response.trace.tool_result_count > 0
     assert response.trace.claim_source_ids
 
 
-def test_summary_fallback_notice_is_localized_to_spanish() -> None:
-    """The bilingual fallback notice must localize to a Spanish request."""
+def test_spanish_synthesis_fallback_reads_as_an_answer_not_an_apology() -> None:
+    """A Spanish fallback must deliver its reviewed narrative without announcing failure."""
     service = AgentService(
         profile=load_profile("data/profile.json"),
         classifier=SummaryClassifier(),
@@ -548,10 +545,9 @@ def test_summary_fallback_notice_is_localized_to_spanish() -> None:
 
     response = service.respond("Resume la experiencia de Marco.", history=[])
 
-    assert response.answer.startswith(
-        "No pude redactar una respuesta en este momento, así que estos son los "
-        "datos verificados del perfil:"
-    )
+    assert response.trace.rendering_mode == "canonical_fallback"
+    assert not response.answer.startswith("No pude redactar")
+    assert response.answer.startswith("Marco trabaja")
 
 
 def test_broad_ai_data_project_query_falls_back_to_sourceable_keyword_matches() -> None:

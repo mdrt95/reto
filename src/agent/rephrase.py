@@ -334,6 +334,13 @@ _INFLECTION_SUFFIXES = (
 )
 _MINIMUM_STEM_LENGTH = 4
 
+# Spanish spells one verb's stem differently across its conjugations: reducir gives
+# both "reduciendo" and "redujo", buscar gives "buscando" and "busqué". Suffix
+# stripping alone leaves those as unrelated stems ("reduc" vs "reduj"), so each pair
+# below is normalized at the stem's end. These are orthographic alternations of the
+# same verb, never a route to a different word.
+_STEM_ALTERNATIONS = (("duj", "duc"), ("qu", "c"), ("gu", "g"), ("z", "c"))
+
 
 def _word_stems(token: str) -> set[str]:
     """Return one token's conservative stem candidates, including the token itself."""
@@ -341,6 +348,10 @@ def _word_stems(token: str) -> set[str]:
     for suffix in _INFLECTION_SUFFIXES:
         if token.endswith(suffix) and len(token) - len(suffix) >= _MINIMUM_STEM_LENGTH:
             stems.add(token[: -len(suffix)])
+    for stem in tuple(stems):
+        for written, alternate in _STEM_ALTERNATIONS:
+            if stem.endswith(written):
+                stems.add(f"{stem[: -len(written)]}{alternate}")
     return stems
 
 

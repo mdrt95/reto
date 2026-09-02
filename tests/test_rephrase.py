@@ -310,3 +310,23 @@ def test_wording_outside_the_selection_is_still_rejected(catalog: list[ResumeFac
     )
 
     assert not verdict.allowed
+
+
+def test_a_spanish_irregular_preterite_matches_its_own_verb(
+    catalog: list[ResumeFact],
+) -> None:
+    """`reducir` conjugates as "reduciendo" and "redujo": the letters differ, the verb does not."""
+    reusable_apis = _fact(catalog, "experience:exp-global-payments.highlight:hl-reusable-apis")
+
+    verdict = verify_synthesis_text(
+        text=(
+            "Marco construyó endpoints de API reutilizables y desacoplados, lo que "
+            "redujo la sobrecarga de integración."
+        ),
+        selected_facts=[reusable_apis],
+        catalog=catalog,
+        language="es",
+        dimension="impact",
+    )
+
+    assert verdict.allowed, verdict.details
