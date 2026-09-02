@@ -67,6 +67,8 @@ _SYNTHESIS_MARKERS: dict[SynthesisDimension, tuple[str, ...]] = {
     ),
 }
 
+_SPANISH_SUMMARY_VERBS = {"resume", "resumeme", "resumen", "resumir"}
+
 _EXPLICIT_OUTCOME_MARKERS = (
     "ahead", "beating", "resolved", "reduced", "improve", "improved", "supporting",
     "independent deployment", "availability", "deadline", "expectations",
@@ -331,6 +333,15 @@ class AnswerPlanner:
     def synthesis_dimension(self, message: str) -> SynthesisDimension | None:
         """Classify only explicit transformation language into a bounded dimension."""
         normalized = normalize_resume_text(message)
+        # "Resume" is a Spanish imperative verb whose object varies ("resume la
+        # experiencia", "resume los proyectos"), and an English noun for the document
+        # itself. Matching the bare token only in Spanish covers every object without
+        # ever firing on "Marco's resume".
+        if (
+            detect_response_language(message) == "es"
+            and set(normalized.split()) & _SPANISH_SUMMARY_VERBS
+        ):
+            return "summary"
         for dimension, markers in _SYNTHESIS_MARKERS.items():
             if any(marker in normalized for marker in markers):
                 return dimension
