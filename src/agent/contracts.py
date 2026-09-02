@@ -202,6 +202,8 @@ class AgentTrace(BaseModel):
     generator_skipped: bool = False
     selection_path: Literal["primary", "recovery", "none"] | None = None
     referent_source: Literal["message", "state"] | None = None
+    referent_correction: bool = False
+    """Whether the answer corrected a false claim about what was already said."""
     answer_mode: str | None = None
     rendering_mode: str | None = None
     answer_topic: str | None = None

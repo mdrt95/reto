@@ -72,6 +72,15 @@ _ANSWER_TOPICS = frozenset(get_args(AnswerTopic))
 """The topics a trace may name; anything else is not a topic this state can record."""
 
 
+def _referent_correction(language: Literal["en", "es"]) -> str:
+    """State that an asserted antecedent was never delivered, before answering it."""
+    return (
+        "No he mencionado eso en esta conversación, pero sí está en el perfil de Marco:"
+        if language == "es"
+        else "I haven't mentioned that in this conversation, but it is in Marco's profile:"
+    )
+
+
 def _bounded(values: list[str], limit: int) -> list[str]:
     """Deduplicate oldest-first and keep the most recent entries within the cap."""
     return list(dict.fromkeys(values))[-limit:]
@@ -265,6 +274,19 @@ class AgentService:
             response.trace.selection_path = (
                 "primary" if response.trace.selected_fact_ids else "none"
             )
+        if (
+            response.trace.selected_fact_ids
+            and self._referent_verdict(message, state) == "undelivered"
+        ):
+            # Correct the premise in front of the answer the ordinary path produced,
+            # rather than rendering a second time here: the selection discipline, the
+            # gates, and the rendering mode all stay exactly what they would be, and
+            # only one honest sentence about this conversation is added.
+            response.answer = (
+                f"{_referent_correction(detect_response_language(message))}\n"
+                f"{response.answer}"
+            )
+            response.trace.referent_correction = True
         response.state = self._accumulate_discourse(
             previous=state,
             current=response.state,
@@ -368,9 +390,8 @@ class AgentService:
                 trace=AgentTrace(guardrail_input="blocked"),
             )
 
-        negative_referent = self._negative_referent_response(message, state)
-        if negative_referent is not None:
-            return negative_referent
+        if self._referent_verdict(message, state) == "absent":
+            return self._negative_referent_response(message, state)
 
         unknown_entities = find_unknown_entities(self._profile, message)
         if unknown_entities:
@@ -1677,34 +1698,60 @@ class AgentService:
             state=state,
         )
 
-    def _negative_referent_response(
+    def _referent_verdict(
         self,
         message: str,
         state: ConversationState | None,
-    ) -> AgentResponse | None:
-        """Deny an antecedent this agent could never have delivered.
+    ) -> Literal["absent", "undelivered"] | None:
+        """Classify an asserted antecedent against the profile and the discourse record.
 
         `The part where it says he worked at Google` asserts something was said. The
-        agent can already answer "that entity is not in the profile", but had no way
+        agent could already answer "that entity is not in the profile", but had no way
         to answer "I never said that", so the turn fell through to a guess or a 503.
-        An antecedent naming nothing the profile contains was never delivered, because
-        every answer is assembled from profile facts alone.
+
+        Three verdicts, separated by the record (D-039):
+
+        - `absent` — the antecedent names nothing in the profile. Every answer is
+          assembled from profile facts alone, so it cannot have been said. Denied.
+        - `undelivered` — it names real content the record does not show delivered.
+          The premise is false but the content is real, so the answer is corrected
+          rather than withheld.
+        - `None` — the record shows it delivered, so the referent is genuine and the
+          ordinary follow-up path owns the turn.
+
+        Only phrases carrying their antecedent inline qualify. A bare referent ("that
+        bit") names nothing checkable and stays on the clarification path.
         """
+        antecedent = self._asserted_antecedent(message)
+        if antecedent is None:
+            return None
+        probe = search_resume(self._profile, SearchResumeArguments(query=antecedent))
+        if probe.profile_missing:
+            return "absent"
+        delivered = set(state.delivered_fact_ids) if state is not None else set()
+        if any(fact.fact_id in delivered for fact in probe.matches):
+            return None
+        return "undelivered"
+
+    @staticmethod
+    def _asserted_antecedent(message: str) -> str | None:
+        """Extract what a message claims was already said, if it says so explicitly."""
         normalized = " ".join(message.casefold().split())
-        antecedent: str | None = None
         for phrase in _REFERENT_PHRASES:
             position = normalized.find(phrase)
             if position == -1:
                 continue
             clause = normalized[position + len(phrase):].strip(" ,.;:¿?¡!")
             if clause:
-                antecedent = clause
-                break
-        if antecedent is None:
-            return None
-        probe = search_resume(self._profile, SearchResumeArguments(query=antecedent))
-        if not probe.profile_missing:
-            return None
+                return clause
+        return None
+
+    def _negative_referent_response(
+        self,
+        message: str,
+        state: ConversationState | None,
+    ) -> AgentResponse:
+        """Deny an antecedent naming nothing the profile contains."""
         language = detect_response_language(message)
         boundary_plan = self._answer_planner.boundary_plan(message, state)
         # The original casing carries the entity signal the normalized clause lost.

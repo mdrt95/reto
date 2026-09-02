@@ -459,3 +459,63 @@ def test_the_same_absent_entity_resolves_alike_across_phrasings(message: str) ->
 
     assert response.trace.grounding_status == "profile_missing"
     assert "Google" in response.answer
+
+
+# --- #19 second half: the record decides whether a referent was ever delivered ---
+
+
+def turn(message: str, state: object | None = None) -> object:
+    """One offline turn that can be handed the state the previous one produced."""
+    service = AgentService(
+        profile=load_profile("data/profile.json"),
+        classifier=StubClassifier(),
+        generator=EmptyFactSetIsAFailure(),
+    )
+    return service.respond(message, history=[], state=state)
+
+
+GLOBAL_PAYMENTS_REFERENT = "The part where it says he worked at Global Payments"
+
+
+def test_a_referent_to_undelivered_profile_content_is_corrected_then_answered() -> None:
+    """The premise is false but the content is real: say so, then answer it."""
+    first = turn("Tell me about Sybil")
+    assert first.state is not None and first.state.delivered_fact_ids
+
+    second = turn(GLOBAL_PAYMENTS_REFERENT, first.state)
+
+    assert second.trace.referent_correction is True
+    assert second.trace.selected_fact_ids
+    assert "Global Payments" in second.answer
+    # The answer below the correction is whatever the ordinary path would have given.
+    assert second.trace.rendering_mode in {"canonical", "rephrased", "transformed"}
+
+
+def test_a_referent_to_content_already_delivered_is_answered_normally() -> None:
+    """Once the record shows it was said, the referent is genuine and needs no denial."""
+    first = turn("Dime acerca de la experiencia de Marco")
+    assert first.state is not None and first.state.delivered_fact_ids
+
+    second = turn(GLOBAL_PAYMENTS_REFERENT, first.state)
+
+    assert second.trace.referent_correction is False
+    assert second.trace.rendering_mode != "negative_referent"
+
+
+def test_the_record_is_what_separates_the_two_verdicts() -> None:
+    """Same message, same profile: only what was delivered may change the answer."""
+    delivered = turn("Dime acerca de la experiencia de Marco").state
+    unrelated = turn("Tell me about Sybil").state
+
+    assert turn(GLOBAL_PAYMENTS_REFERENT, delivered).trace.referent_correction is False
+    assert turn(GLOBAL_PAYMENTS_REFERENT, unrelated).trace.referent_correction is True
+
+
+def test_an_antecedent_absent_from_the_profile_is_still_denied_outright() -> None:
+    """The stronger claim survives: never said, and never in the profile either."""
+    first = turn("Tell me about Sybil")
+
+    second = turn("The part where it says he worked at google", first.state)
+
+    assert second.trace.rendering_mode == "negative_referent"
+    assert not second.trace.selected_fact_ids

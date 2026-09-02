@@ -508,7 +508,8 @@ agent produces is assembled from profile facts, so an antecedent matching no fac
 never delivered, and the honest answer says so. A bare referent (`that bit`) names
 nothing checkable and stays on the clarification path. Accumulated `delivered_fact_ids`
 (#12) will let this distinguish *never said* from *not in the profile* per conversation;
-until then the profile-wide check is the stronger claim available.
+until then the profile-wide check is the stronger claim available. (Delivered in D-039
+and D-040.)
 
 **Query terms are not entities.** `ResumeSearchResult.unmatched_terms` holds raw query
 terms that matched no fact, and rendering it produced *"I couldn't find anything about
@@ -577,3 +578,42 @@ is lossless today; if the profile outgrows the cap, the oldest deliveries are dr
 "already said" degrades toward the recent past rather than failing. Worst-case state is
 roughly 17 KB, bounded entirely by the model's caps — `POST /api/chat` measures its
 size limits against the message and history only.
+
+## D-040: Correct a false premise in front of the answer, never instead of it
+
+**Status:** Accepted (completes D-038 on the foundation of D-039)
+
+An asserted antecedent now resolves to one of three verdicts, and the discourse record
+is what separates them:
+
+- **absent** — the antecedent names nothing in the profile. Every answer is assembled
+  from profile facts alone, so it cannot have been said. Denied outright.
+- **undelivered** — it names real content the record does not show delivered. The
+  premise is false but the content is real.
+- **genuine** — the record shows it delivered, so the ordinary follow-up path owns the
+  turn and nothing is denied.
+
+The `undelivered` verdict is answered, not deflected. Withholding content the profile
+holds because the user misremembered who said it first helps nobody, and a plain denial
+would be the deflection the release gates exist to prevent.
+
+**The correction is prefixed at the single exit point, not rendered separately.** The
+first implementation of this path selected and rendered its own facts, and produced an
+eight-item dump of a whole topic including bare index terms — a worse answer than the
+same question gets without the referent phrase. Prefixing one sentence onto whatever the
+ordinary path produced keeps the selection discipline, the output guard, and the
+rendering mode exactly as they would otherwise be. The trace records the correction in
+`referent_correction` rather than overloading `rendering_mode`, which continues to
+describe how the facts were rendered.
+
+The correction applies only to a turn that actually delivered facts. Prefixing "I haven't
+mentioned that" onto a clarification would add a claim without adding an answer.
+
+**Why:** the transcript that opened D-038 shows the user referring to something never
+said. Denying is right only when the content does not exist; when it does, the useful
+answer is to say the premise is wrong and then answer the question underneath it.
+
+**Consequence:** the verdict depends on client-carried state (D-022). A client that
+drops the record makes every asserted antecedent look undelivered, so the agent adds a
+correction it cannot support. The failure is one unnecessary sentence in front of a
+correct answer, which is why the correction is a prefix rather than a refusal.
