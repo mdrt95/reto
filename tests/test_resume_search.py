@@ -3,7 +3,12 @@
 import pytest
 
 from src.models.profile import load_profile
-from src.tools.profile_tools import SearchResumeArguments, build_resume_fact_catalog, search_resume
+from src.tools.profile_tools import (
+    SearchResumeArguments,
+    build_resume_fact_catalog,
+    detect_response_language,
+    search_resume,
+)
 
 
 @pytest.mark.parametrize(
@@ -148,3 +153,64 @@ def test_language_detection_recognizes_common_spanish_request_words(message: str
     from src.tools.profile_tools import detect_response_language
 
     assert detect_response_language(message) == expected
+
+
+@pytest.mark.parametrize(
+    ("text", "language"),
+    [
+        # The originally reported failures.
+        ("Qué idiomas habla marco?", "es"),
+        ("Dónde estudió Marco?", "es"),
+        ("Resume ese proyecto.", "es"),
+        # Function words the closed marker set omitted entirely.
+        ("¿Dónde estudió Marco?", "es"),
+        ("¿Cuándo empezó en Global Payments?", "es"),
+        ("¿Quién es Marco?", "es"),
+        ("¿Cuánto tiempo lleva ahí?", "es"),
+        ("Desde cuando trabaja ahi?", "es"),
+        # Morphology, with no marker word present at all.
+        ("Necesito información sobre certificaciones", "es"),
+        ("Explicame detalladamente", "es"),
+        # English must not drift into Spanish.
+        ("What is Marco's resume?", "en"),
+        ("Where did Marco study?", "en"),
+        ("Summarize that project.", "en"),
+        ("What are Marco's achievements?", "en"),
+        ("Tell me about yourself", "en"),
+        ("How long has Marco worked there?", "en"),
+    ],
+)
+def test_response_language_detection(text: str, language: str) -> None:
+    """Detection must read orthography and morphology, not only a word list."""
+    assert detect_response_language(text) == language
+
+
+@pytest.mark.parametrize(
+    ("accented", "unaccented"),
+    [
+        ("¿Dónde estudió Marco?", "Donde estudio Marco?"),
+        ("¿Qué tecnologías dominas?", "Que tecnologias dominas?"),
+        ("¿Cuándo empezó?", "Cuando empezo?"),
+        ("¿Cuál es su experiencia?", "Cual es su experiencia?"),
+    ],
+)
+def test_accent_removal_never_changes_the_detected_language(
+    accented: str, unaccented: str
+) -> None:
+    """Users type without accents constantly; that cannot flip the response language."""
+    assert detect_response_language(accented) == detect_response_language(unaccented)
+
+
+@pytest.mark.parametrize(
+    ("bare", "punctuated"),
+    [
+        ("Resume ese proyecto", "Resume ese proyecto."),
+        ("Qué proyectos", "¿Qué proyectos?"),
+        ("Hablame de tu experiencia", "Hablame de tu experiencia!"),
+    ],
+)
+def test_trailing_punctuation_cannot_hide_the_only_marker(
+    bare: str, punctuated: str
+) -> None:
+    """A sentence-final marker is still a marker; punctuation must not mask it."""
+    assert detect_response_language(punctuated) == detect_response_language(bare) == "es"
