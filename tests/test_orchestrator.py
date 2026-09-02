@@ -1587,9 +1587,8 @@ def test_zero_selection_never_invokes_the_generator_with_an_empty_fact_set(
 @pytest.mark.parametrize(
     "message",
     [
-        "Cuales son los logros de Marco?",
-        "What are Marco's achievements?",
         "Desde cuando Marco trabaja ahi?",
+        "Dónde estudió Marco?",
     ],
 )
 def test_unanchored_zero_selection_clarifies_without_substituting_facts(

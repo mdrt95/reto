@@ -1,6 +1,7 @@
 """Deterministic answer planning and canonical direct-answer rendering."""
 
 import re
+from collections import Counter
 from typing import Literal
 
 from src.agent.contracts import (
@@ -50,7 +51,12 @@ _MONTH_NAMES = {
 
 _SYNTHESIS_MARKERS: dict[SynthesisDimension, tuple[str, ...]] = {
     "summary": ("summarize", "summary", "resume la", "resumen"),
-    "impact": ("impact", "impacto", "outcome", "resultado", "efecto"),
+    # Achievement wording points at the outcome-bearing facts the impact dimension
+    # already selects and already ranks; matching is substring, so plurals are covered.
+    "impact": (
+        "impact", "impacto", "outcome", "resultado", "efecto",
+        "achiev", "accomplish", "logro",
+    ),
     "significance": (
         "significance", "significancia", "why does", "why is", "por que importa",
         "importancia",
@@ -393,6 +399,21 @@ class AnswerPlanner:
             topic = fallback_topic
             scope = fallback_scope
             requested_field = fallback_field
+            if dimension == "impact" and topic == "summary":
+                # An unscoped impact question ("achievements", "logros") carries no
+                # topic token, but the outcome evidence it asks for is never in the
+                # summary topic, so the fallback selects nothing. Anchor on the topic
+                # that actually holds the canonical outcome facts. No fact is derived:
+                # the predicate is the same one the impact branch already filters on.
+                outcome_topics = Counter(
+                    fact.topic
+                    for fact in catalog
+                    if fact.field_name is None and self._has_explicit_outcome(fact)
+                )
+                if outcome_topics:
+                    topic = outcome_topics.most_common(1)[0][0]
+                    scope = "project" if topic == "projects" else "employment"
+                    requested_field = "projects" if topic == "projects" else "experience"
 
         topic_facts = [
             fact

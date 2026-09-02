@@ -108,6 +108,46 @@ CASES = (
             "de plazo, e implementó caching, resolviendo cuellos de botella de disponibilidad."
         ),
     ),
+    SynthesisCase(
+        "What are Marco's achievements?",
+        "impact",
+        "experience",
+        "en",
+        (
+            "Marco collaborated on an ISV module, beating delivery expectations, and "
+            "implemented caching, resolving availability bottlenecks."
+        ),
+    ),
+    SynthesisCase(
+        "What did Marco accomplish in his work?",
+        "impact",
+        "experience",
+        "en",
+        (
+            "Marco collaborated on an ISV module, beating delivery expectations, and "
+            "implemented caching, resolving availability bottlenecks."
+        ),
+    ),
+    SynthesisCase(
+        "¿Qué logró Marco en su trabajo?",
+        "impact",
+        "experience",
+        "es",
+        (
+            "Marco colaboró en la entrega de un módulo ISV, superando las expectativas "
+            "de plazo, e implementó caching, resolviendo cuellos de botella de disponibilidad."
+        ),
+    ),
+    SynthesisCase(
+        "Cuales son los logros de Marco?",
+        "impact",
+        "experience",
+        "es",
+        (
+            "Marco colaboró en la entrega de un módulo ISV, superando las expectativas "
+            "de plazo, e implementó caching, resolviendo cuellos de botella de disponibilidad."
+        ),
+    ),
 )
 
 
@@ -187,6 +227,7 @@ def test_synthesis_contract_selects_bounded_evidence_and_compresses_it(
     [
         ("Summarize Marco's experience.", "Resume la experiencia de Marco."),
         ("What impact did Marco's work have?", "¿Qué impacto tuvo el trabajo de Marco?"),
+        ("What are Marco's achievements?", "Cuales son los logros de Marco?"),
     ],
 )
 def test_equivalent_synthesis_requests_select_the_same_ranked_scope(
