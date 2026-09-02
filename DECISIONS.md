@@ -652,3 +652,31 @@ pre-existing test in that file still passes — which is the measure of what the
 could not previously see. The group runs 222 cases in about one second, still with no
 provider in the path, and carries a negative control proving the new detector fires on
 unequal fact selections.
+
+## D-042: Enforce informativeness once, at the final delivery boundary
+
+**Status:** Accepted (extends D-029 without requiring narratives for index terms)
+
+A selected fact with neither `narrative_en` nor `narrative_es` may remain a plain value
+inside a labeled deterministic list, but its normalized `text` may never equal the
+normalized complete answer. `AgentService.respond()` enforces that rule immediately after
+the internal response path returns and before referent correction, discourse accumulation,
+or public delivery. Markdown and terminal punctuation cannot bypass the equality check.
+
+When the floor fires, the candidate is replaced by a fixed bilingual statement that names
+the verified profile item, states that the item alone is not a complete answer, and asks
+for the section where it appears. The trace changes `rendering_mode` to
+`informativeness_fallback` and records `informativeness_outcome="fallback"`; ordinary
+answers record `"pass"`. The operational event carries that outcome without logging any
+answer content. Because the fallback names only one item, its fact, source, claim, and
+client-carried state metadata are narrowed to that delivered item before accumulation.
+
+**Why:** 42 of the current catalog's 55 facts are index values rather than authored prose.
+Writing 84 filler narratives would add bilingual review and maintenance work without adding
+information. Changing `fact_display_text` would instead break valid list projections. A
+single final gate covers every current and future rendering path while preserving both uses.
+
+**Consequence:** the comparison is intentionally narrower than a length or word-count
+heuristic: contextual employment-field sentences, labeled one-item lists, and concise
+reviewed narratives remain deliverable. Selection cardinality is irrelevant because a
+synthesis path can select several facts and still reduce its output to one bare term.

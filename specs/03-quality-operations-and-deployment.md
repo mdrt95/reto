@@ -42,11 +42,12 @@ the answer plan at all. `transformed` is the only mode whose wording the provide
 - Experience and project questions return the correct topic and never an employer-only projection unless employers were explicitly requested.
 - Every synthesis output stays within the 3-sentence and 75-word default, and none concatenates all selected canonical narratives.
 - No output introduces an unsupported entity, technology, number, responsibility, impact, or outcome.
+- No complete answer is only the normalized text of a selected fact lacking both bilingual narratives; labeled list items remain valid.
 - No clear résumé question with sufficient canonical facts returns HTTP 503.
 - Equivalent English and Spanish scenarios resolve to the same dimension, topic, scope, and ranking, with Spanish a prefix of the English selection (D-036).
 - Provider-outage scenarios return the expected direct or concise canonical fallback at HTTP 200.
 - Tool-required scenarios verify the correct tool and topic scope, not merely that some tool ran.
-- Internal traces carry the expected answer mode, rendering mode, fact and source selection, fallback reason, and final size counts.
+- Internal traces carry the expected answer mode, rendering mode, fact and source selection, fallback reason, informativeness outcome, and final size counts.
 
 Operational gates from `PLAN.md` continue to apply: p95 latency at or below 8 seconds and
 estimated request cost at or below USD 0.03.
@@ -126,6 +127,7 @@ Emit one JSON log per completed request with:
 - request ID and server-generated conversation ID;
 - route, outcome code, intent/confidence, tool name and result count;
 - guardrail outcome, grounding summary and count of claim sources;
+- informativeness outcome when the standalone-fact floor is evaluated;
 - model name, stage latencies, token counts when available, and cost estimate;
 - sanitized error code.
 
