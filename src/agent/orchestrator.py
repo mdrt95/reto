@@ -3,7 +3,7 @@
 import json
 import logging
 import re
-from typing import Literal, Protocol
+from typing import Literal, Protocol, get_args
 
 from src.agent.answer_planning import (
     AnswerPlanner,
@@ -13,8 +13,12 @@ from src.agent.answer_planning import (
     plan_trace_fields,
 )
 from src.agent.contracts import (
+    MAX_DELIVERED_FACT_IDS,
+    MAX_DISCUSSED_SOURCE_IDS,
+    MAX_DISCUSSED_TOPICS,
     AnswerMode,
     AnswerPlan,
+    AnswerTopic,
     AgentResponse,
     AgentTrace,
     ClaimKind,
@@ -54,6 +58,7 @@ from src.tools.profile_tools import (
     filter_experience,
     build_resume_fact_catalog,
     detect_response_language,
+    detect_resume_topic,
     fact_display_text,
     find_unknown_entities,
     normalize_resume_text,
@@ -62,6 +67,38 @@ from src.tools.profile_tools import (
     search_resume,
     summarize_profile,
 )
+
+_ANSWER_TOPICS = frozenset(get_args(AnswerTopic))
+"""The topics a trace may name; anything else is not a topic this state can record."""
+
+
+def _referent_correction(language: Literal["en", "es"]) -> str:
+    """State that an asserted antecedent was never delivered, before answering it."""
+    return (
+        "No he mencionado eso en esta conversación, pero sí está en el perfil de Marco:"
+        if language == "es"
+        else "I haven't mentioned that in this conversation, but it is in Marco's profile:"
+    )
+
+
+def _bounded(values: list[str], limit: int) -> list[str]:
+    """Deduplicate oldest-first and keep the most recent entries within the cap."""
+    return list(dict.fromkeys(values))[-limit:]
+
+
+_REFERENT_PHRASES = (
+    "the part where it says", "the part where you said", "the part that says",
+    "the bit where it says", "when you said", "where you said",
+    "where you mentioned", "when you mentioned", "you said that", "you mentioned that",
+    "la parte donde dice", "la parte donde dijiste", "la parte que dice",
+    "cuando dijiste", "donde dijiste", "donde mencionaste", "cuando mencionaste",
+    "dijiste que", "mencionaste que",
+)
+"""Phrases that assert a specific antecedent was already said.
+
+Only phrases carrying their antecedent inline qualify. A bare referent ("that bit")
+names nothing checkable and must stay on the clarification path.
+"""
 
 _RANKING_MARKERS = (
     "rank", "ranking", "best to worst", "worst to best",
@@ -237,7 +274,106 @@ class AgentService:
             response.trace.selection_path = (
                 "primary" if response.trace.selected_fact_ids else "none"
             )
+        if (
+            response.trace.selected_fact_ids
+            and self._referent_verdict(message, state) == "undelivered"
+        ):
+            # Correct the premise in front of the answer the ordinary path produced,
+            # rather than rendering a second time here: the selection discipline, the
+            # gates, and the rendering mode all stay exactly what they would be, and
+            # only one honest sentence about this conversation is added.
+            response.answer = (
+                f"{_referent_correction(detect_response_language(message))}\n"
+                f"{response.answer}"
+            )
+            response.trace.referent_correction = True
+        response.state = self._accumulate_discourse(
+            previous=state,
+            current=response.state,
+            trace=response.trace,
+        )
         return response
+
+    def _accumulate_discourse(
+        self,
+        *,
+        previous: ConversationState | None,
+        current: ConversationState | None,
+        trace: AgentTrace,
+    ) -> ConversationState | None:
+        """Carry the discourse record forward across turns, derived from this turn's trace.
+
+        Merging here rather than inside each answer path is deliberate. Every route
+        already reports what it selected, so the record follows from the trace alone,
+        and a route added later cannot forget to maintain it.
+
+        The two layers keep their own lifetimes: `current` supplies the single-turn
+        snapshot exactly as before, and a turn that produced no snapshot resets those
+        fields rather than leaving a stale referent behind for the next `tell me more`.
+        """
+        catalog = build_resume_fact_catalog(self._profile)
+        known_facts = {fact.fact_id for fact in catalog}
+        known_sources = {fact.source_id for fact in catalog}
+        turn_facts = [
+            fact_id for fact_id in trace.selected_fact_ids if fact_id in known_facts
+        ]
+        turn_sources = [
+            source_id
+            for source_id in trace.selected_source_ids
+            if source_id in known_sources
+        ]
+        if previous is None and current is None and not turn_facts and not turn_sources:
+            return None
+
+        base = current if current is not None else ConversationState(
+            response_language=previous.response_language if previous else "en",
+        )
+        # Client-carried state is untrusted input. Keep only identifiers the catalog
+        # still defines, so a forged or stale record cannot claim a fact was delivered.
+        delivered = [
+            fact_id
+            for fact_id in (previous.delivered_fact_ids if previous else [])
+            if fact_id in known_facts
+        ]
+        discussed_sources = [
+            source_id
+            for source_id in (previous.discussed_source_ids if previous else [])
+            if source_id in known_sources
+        ]
+        discussed_topics = list(previous.discussed_topics) if previous else []
+        focus = previous.focus_source_id if previous else None
+        if focus is not None and focus not in known_sources:
+            focus = None
+
+        if turn_facts or turn_sources:
+            delivered = _bounded(delivered + turn_facts, MAX_DELIVERED_FACT_IDS)
+            discussed_sources = _bounded(
+                discussed_sources + turn_sources, MAX_DISCUSSED_SOURCE_IDS
+            )
+            if trace.answer_topic in _ANSWER_TOPICS:
+                discussed_topics = _bounded(
+                    [*discussed_topics, trace.answer_topic], MAX_DISCUSSED_TOPICS
+                )
+            roots = list(
+                dict.fromkeys(
+                    source_id.split(".highlight:", 1)[0] for source_id in turn_sources
+                )
+            )
+            # One unit answered from is a referent; several is an ambiguity, and
+            # carrying the older focus through would answer about the wrong thing.
+            focus = roots[0] if len(roots) == 1 else None
+
+        # Revalidated rather than copied: the caps are the model's promise, and this
+        # is the one writer, so a cap violation must fail here rather than ship.
+        return ConversationState.model_validate(
+            {
+                **base.model_dump(),
+                "focus_source_id": focus,
+                "delivered_fact_ids": delivered,
+                "discussed_topics": discussed_topics,
+                "discussed_source_ids": discussed_sources,
+            }
+        )
 
     def _respond(
         self,
@@ -253,6 +389,9 @@ class AgentService:
                 answer=input_result.message,
                 trace=AgentTrace(guardrail_input="blocked"),
             )
+
+        if self._referent_verdict(message, state) == "absent":
+            return self._negative_referent_response(message, state)
 
         unknown_entities = find_unknown_entities(self._profile, message)
         if unknown_entities:
@@ -332,7 +471,13 @@ class AgentService:
                 decision = IntentDecision(intent=Intent.DIRECT_QUESTION, confidence=1.0)
             if decision is None:
                 if follow_up is None and self._resume_search_arguments(message, state) is None:
-                    raise
+                    # The classifier only ever chose a tool; it never chose the facts.
+                    # An anchor evidenced in the message is enough to answer without it,
+                    # and anything less deflects at HTTP 200 like every other boundary.
+                    topic = detect_resume_topic(self._profile, message)
+                    if topic is None:
+                        return self._unclassified_response(message, state, fallback_reason)
+                    follow_up = SearchResumeArguments(query=message, topic=topic)
                 decision = IntentDecision(intent=Intent.FOLLOW_UP, confidence=1.0)
         if explicit_plan is not None:
             explicit_response = self._direct_plan_response(
@@ -1524,6 +1669,119 @@ class AgentService:
         lines.extend(f"- {fact_display_text(match, result.language)}" for match in result.matches)
         return "\n".join(lines)
 
+    def _unclassified_response(
+        self,
+        message: str,
+        state: ConversationState | None,
+        fallback_reason: str | None,
+    ) -> AgentResponse:
+        """Deflect deterministically when nothing local can resolve what was asked.
+
+        Every other boundary in this system answers at HTTP 200. A classifier that
+        returns malformed output twice is a provider problem, and the user sees a
+        frontend rendering nothing at all when it becomes a 503.
+        """
+        language = detect_response_language(message)
+        boundary_plan = self._answer_planner.boundary_plan(message, state)
+        answer = (
+            "¿Podrías aclarar a qué parte del perfil profesional de Marco te refieres?"
+            if language == "es"
+            else "Could you clarify which part of Marco's professional profile you mean?"
+        )
+        return AgentResponse(
+            answer=answer,
+            trace=AgentTrace(
+                grounding_status="clarification",
+                fallback_reason=fallback_reason,
+                **plan_trace_fields(boundary_plan, "clarification"),
+            ),
+            state=state,
+        )
+
+    def _referent_verdict(
+        self,
+        message: str,
+        state: ConversationState | None,
+    ) -> Literal["absent", "undelivered"] | None:
+        """Classify an asserted antecedent against the profile and the discourse record.
+
+        `The part where it says he worked at Google` asserts something was said. The
+        agent could already answer "that entity is not in the profile", but had no way
+        to answer "I never said that", so the turn fell through to a guess or a 503.
+
+        Three verdicts, separated by the record (D-039):
+
+        - `absent` — the antecedent names nothing in the profile. Every answer is
+          assembled from profile facts alone, so it cannot have been said. Denied.
+        - `undelivered` — it names real content the record does not show delivered.
+          The premise is false but the content is real, so the answer is corrected
+          rather than withheld.
+        - `None` — the record shows it delivered, so the referent is genuine and the
+          ordinary follow-up path owns the turn.
+
+        Only phrases carrying their antecedent inline qualify. A bare referent ("that
+        bit") names nothing checkable and stays on the clarification path.
+        """
+        antecedent = self._asserted_antecedent(message)
+        if antecedent is None:
+            return None
+        probe = search_resume(self._profile, SearchResumeArguments(query=antecedent))
+        if probe.profile_missing:
+            return "absent"
+        delivered = set(state.delivered_fact_ids) if state is not None else set()
+        if any(fact.fact_id in delivered for fact in probe.matches):
+            return None
+        return "undelivered"
+
+    @staticmethod
+    def _asserted_antecedent(message: str) -> str | None:
+        """Extract what a message claims was already said, if it says so explicitly."""
+        normalized = " ".join(message.casefold().split())
+        for phrase in _REFERENT_PHRASES:
+            position = normalized.find(phrase)
+            if position == -1:
+                continue
+            clause = normalized[position + len(phrase):].strip(" ,.;:¿?¡!")
+            if clause:
+                return clause
+        return None
+
+    def _negative_referent_response(
+        self,
+        message: str,
+        state: ConversationState | None,
+    ) -> AgentResponse:
+        """Deny an antecedent naming nothing the profile contains."""
+        language = detect_response_language(message)
+        boundary_plan = self._answer_planner.boundary_plan(message, state)
+        # The original casing carries the entity signal the normalized clause lost.
+        entities = find_unknown_entities(self._profile, message)
+        if entities:
+            named = ", ".join(entities)
+            answer = (
+                f"No he dicho nada sobre {named}, y no aparece en el perfil de Marco, "
+                "así que no hay nada a lo que pueda referirme."
+                if language == "es"
+                else f"I haven't said anything about {named}, and it isn't in Marco's "
+                "profile, so there's nothing for me to refer back to."
+            )
+        else:
+            answer = (
+                "No he dicho eso: nada en el perfil de Marco corresponde a esa parte, "
+                "así que no hay nada a lo que pueda referirme."
+                if language == "es"
+                else "I haven't said that — nothing in Marco's profile corresponds to "
+                "it, so there's nothing for me to refer back to."
+            )
+        return AgentResponse(
+            answer=answer,
+            trace=AgentTrace(
+                grounding_status="referent_missing",
+                **plan_trace_fields(boundary_plan, "negative_referent"),
+            ),
+            state=state,
+        )
+
     def _profile_missing_response(
         self,
         decision: IntentDecision,
@@ -1531,8 +1789,11 @@ class AgentService:
         tool_name: str,
         answer_plan: AnswerPlan,
     ) -> AgentResponse:
-        if result.unmatched_terms:
-            entities = ", ".join(result.unmatched_terms)
+        # `unmatched_terms` is raw query residue, not entities — naming it produced
+        # "I couldn't find anything about his". Entity naming has exactly one source.
+        missing_entities = find_unknown_entities(self._profile, result.query)
+        if missing_entities:
+            entities = ", ".join(missing_entities)
             answer = (
                 f"No encontré nada sobre {entities} en el perfil de Marco, así que no "
                 "puedo opinar al respecto."

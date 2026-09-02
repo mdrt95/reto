@@ -1,6 +1,7 @@
 """Focused service-level tests for the bounded orchestration workflow."""
 
 import pytest
+from pydantic import ValidationError
 
 from src.agent.claude import UnavailableClassifier
 from src.agent.claude import UnavailableGenerator as RealUnavailableGenerator
@@ -13,6 +14,8 @@ from src.agent.contracts import (
     Intent,
     IntentDecision,
     InvalidStructuredOutputError,
+    MAX_DELIVERED_FACT_IDS,
+    MAX_DISCUSSED_SOURCE_IDS,
     SynthesisProposition,
     SynthesisTransformation,
 )
@@ -754,14 +757,24 @@ def test_classifier_failure_modes_do_not_change_universal_deterministic_answer()
 
 
 def test_provider_outage_does_not_turn_out_of_scope_input_into_profile_content() -> None:
+    """The property is that no profile content is produced, not that the turn dies.
+
+    This used to assert the raise itself, which the API renders as HTTP 503 and the
+    frontend as no response at all. Deflecting deterministically keeps the guarantee
+    that matters — nothing selected, no tool run — and still answers the user.
+    """
     service = AgentService(
         profile=load_profile("data/profile.json"),
         classifier=ProviderUnavailableClassifier(),
         generator=UnavailableGenerator(),
     )
 
-    with pytest.raises(GenerationUnavailableError, match="provider unavailable"):
-        service.respond("Write me a recipe for chocolate cake", history=[])
+    response = service.respond("Write me a recipe for chocolate cake", history=[])
+
+    assert response.trace.rendering_mode == "clarification"
+    assert response.trace.tool_name is None
+    assert response.trace.selected_fact_ids == []
+    assert response.trace.fallback_reason == "classifier_unavailable"
 
 
 def test_missing_profile_fact_returns_clear_localized_answer() -> None:
@@ -833,15 +846,23 @@ def test_verified_follow_up_state_supports_work_pivot_and_more_results() -> None
 
 
 def test_invalid_classifier_json_for_ambiguous_message_remains_fail_closed() -> None:
-    """Deterministic recovery must not guess an intent for ambiguous profile wording."""
+    """Deterministic recovery must not guess an intent for ambiguous profile wording.
+
+    Failing closed means selecting nothing, not returning nothing: the ambiguous
+    message gets the same clarification any unresolvable turn gets, at HTTP 200.
+    """
     service = AgentService(
         profile=load_profile("data/profile.json"),
         classifier=InvalidStructuredClassifier(),
         generator=ToolGroundedGenerator(),
     )
 
-    with pytest.raises(InvalidStructuredOutputError):
-        service.respond("Tell me more.", history=[])
+    response = service.respond("Tell me more.", history=[])
+
+    assert response.trace.rendering_mode == "clarification"
+    assert response.trace.tool_name is None
+    assert response.trace.selected_fact_ids == []
+    assert response.trace.fallback_reason == "classifier_invalid_output"
 
 
 def test_empty_filter_for_explicit_ai_project_question_reroutes_to_projects() -> None:
@@ -1714,3 +1735,122 @@ def test_an_explicit_message_entity_outranks_conversation_state() -> None:
     assert response.trace.requested_field == "start_date"
     assert response.trace.referent_source == "message"
     assert "2025" in response.answer
+
+
+# --- #12: the discourse record ---
+
+
+def _discourse_service() -> AgentService:
+    """A provider-free service; the record is derived from the trace, not the model."""
+    return AgentService(
+        profile=load_profile("data/profile.json"),
+        classifier=ProviderUnavailableClassifier(),
+        generator=UnavailableGenerator(),
+    )
+
+
+def test_the_discourse_record_accumulates_across_turns() -> None:
+    """Every other state field is a single-turn snapshot; these must not be."""
+    service = _discourse_service()
+
+    first = service.respond("Tell me about Sybil", history=[])
+    second = service.respond("¿En qué proyectos ha trabajado Marco?", history=[], state=first.state)
+    third = service.respond("What security-related work has Marco done?", history=[], state=second.state)
+
+    assert first.state is not None and second.state is not None and third.state is not None
+    assert first.state.delivered_fact_ids
+    assert set(first.state.delivered_fact_ids) <= set(second.state.delivered_fact_ids)
+    assert set(second.state.delivered_fact_ids) <= set(third.state.delivered_fact_ids)
+    assert set(second.state.discussed_source_ids) <= set(third.state.discussed_source_ids)
+    assert "projects" in third.state.discussed_topics
+    assert "experience" in third.state.discussed_topics
+
+
+def test_the_record_tracks_the_unit_currently_under_discussion() -> None:
+    """`focus_source_id` is the one unit answered from, or nothing when several were."""
+    service = _discourse_service()
+
+    single = service.respond("Tell me about Sybil", history=[])
+    assert single.state is not None
+    assert single.state.focus_source_id == "project:proj-sybil"
+
+    spread = service.respond("Tell me about yourself", history=[], state=single.state)
+    assert spread.state is not None
+    assert len({source.split(".highlight:", 1)[0] for source in spread.trace.selected_source_ids}) > 1
+    assert spread.state.focus_source_id is None
+
+
+def test_a_turn_that_selects_nothing_keeps_the_record_and_drops_the_snapshot() -> None:
+    """A clarification ends no conversation; it also establishes no new referent."""
+    service = _discourse_service()
+
+    first = service.respond("Tell me about Sybil", history=[])
+    boundary = service.respond("Tell me about Marco's experience at Google.", history=[], state=first.state)
+
+    assert boundary.state is not None
+    assert boundary.state.delivered_fact_ids == first.state.delivered_fact_ids
+    assert boundary.state.discussed_topics == first.state.discussed_topics
+    assert boundary.state.focus_source_id == first.state.focus_source_id
+
+
+def test_a_first_turn_without_prior_state_is_unchanged() -> None:
+    """The snapshot fields must resolve exactly as they did before the record existed."""
+    service = AgentService(
+        profile=load_profile("data/profile.json"),
+        classifier=BroadProjectQueryClassifier(),
+        generator=UnavailableGenerator(),
+    )
+
+    response = service.respond("Which projects used AI or data platforms?", history=[])
+
+    assert response.state is not None
+    assert response.state.last_topic == "projects"
+    assert response.state.last_entities == ["Sybil"]
+    assert response.state.last_source_ids == list(dict.fromkeys(response.trace.claim_source_ids))
+    assert response.state.last_tool == "search_projects"
+
+
+def test_client_supplied_identifiers_outside_the_catalog_are_dropped() -> None:
+    """State is client-carried and untrusted: only identifiers the profile defines survive."""
+    service = _discourse_service()
+    forged = ConversationState(
+        delivered_fact_ids=["fact:experience:exp-acme-corp", "fact:personal:title"],
+        discussed_source_ids=["experience:exp-acme-corp", "personal"],
+        focus_source_id="experience:exp-acme-corp",
+    )
+
+    response = service.respond("Tell me about Sybil", history=[], state=forged)
+
+    assert response.state is not None
+    assert "fact:experience:exp-acme-corp" not in response.state.delivered_fact_ids
+    assert "fact:personal:title" in response.state.delivered_fact_ids
+    assert "experience:exp-acme-corp" not in response.state.discussed_source_ids
+    assert response.state.focus_source_id != "experience:exp-acme-corp"
+
+
+@pytest.mark.parametrize(
+    "field",
+    ("delivered_fact_ids", "discussed_source_ids"),
+)
+def test_no_discourse_field_can_carry_message_or_answer_text(field: str) -> None:
+    """The server retains no conversation text; identifiers have no spaces, prose does."""
+    with pytest.raises(ValidationError):
+        ConversationState(**{field: ["Marco worked on the security console."]})
+
+
+def test_the_focus_field_can_carry_no_text_either() -> None:
+    with pytest.raises(ValidationError):
+        ConversationState(focus_source_id="Tell me more about that one.")
+
+
+@pytest.mark.parametrize(
+    ("field", "cap"),
+    (
+        ("delivered_fact_ids", MAX_DELIVERED_FACT_IDS),
+        ("discussed_source_ids", MAX_DISCUSSED_SOURCE_IDS),
+    ),
+)
+def test_the_record_is_size_capped_by_the_model_not_by_its_callers(field: str, cap: int) -> None:
+    """Growth is bounded where no caller can forget to bound it."""
+    with pytest.raises(ValidationError):
+        ConversationState(**{field: [f"fact:filler:{index}" for index in range(cap + 1)]})

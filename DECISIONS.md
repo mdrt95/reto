@@ -480,3 +480,140 @@ surfaced one live defect: Spanish summary recognition keyed on the fixed phrase
 selected five unrelated experience and education facts. Spanish now matches the bare
 imperative verb, gated on detected language so the English noun "resume" never triggers
 it. The full matrix passes against the configured provider.
+
+## D-038: Answer every turn at HTTP 200, and name entities from one detector only
+
+**Status:** Accepted (closes the last classifier-failure raise left by D-020)
+
+Three rules, all reached through the same observed turn — a user wrote *"The part where
+it says he worked at google"* and received no assistant response at all.
+
+**A turn never ends in a raise.** `AgentService._respond` re-raised
+`GenerationUnavailableError` when the classifier failed twice and no local recovery
+matched, which `POST /api/chat` renders as HTTP 503 and the frontend as nothing. The
+classifier only ever chose a tool; it never chose facts. So an anchor evidenced in the
+message (`detect_resume_topic`) now drives `search_resume` directly, and a message with
+no evidenced anchor gets the same deterministic clarification any unresolvable turn gets.
+Failing closed means selecting nothing, not returning nothing.
+
+An unanchored question still clarifies rather than widening to `summary` facts, which is
+the substitution `detect_resume_topic` exists to prevent. `"What results has Marco
+produced?"` is the one release-adjacent phrasing in that position: it is answered
+normally, and clarifies only while the classifier is down.
+
+**A falsified antecedent is answered, not guessed at.** A phrase that asserts what was
+already said and carries its antecedent inline (`the part where it says …`, `cuando
+dijiste …`) is checked against the profile before anything else runs. Every answer this
+agent produces is assembled from profile facts, so an antecedent matching no fact was
+never delivered, and the honest answer says so. A bare referent (`that bit`) names
+nothing checkable and stays on the clarification path. Accumulated `delivered_fact_ids`
+(#12) will let this distinguish *never said* from *not in the profile* per conversation;
+until then the profile-wide check is the stronger claim available. (Delivered in D-039
+and D-040.)
+
+**Query terms are not entities.** `ResumeSearchResult.unmatched_terms` holds raw query
+terms that matched no fact, and rendering it produced *"I couldn't find anything about
+**his** in Marco's profile"* and *"No encontré nada sobre **resume, marco.**"*. It is now
+a retrieval diagnostic only; `find_unknown_entities` is the sole source of a named entity
+in any answer. Pronouns, discourse verbs, and summarize verbs joined `_STOP_WORDS`, and
+`normalize_resume_text` trims edge dots so `marco.` and `marco` are one token — which
+also fixes the retrieval failure underneath the wording, since a stocked topic no longer
+looks empty because the question contained *his*.
+
+**Why:** every other boundary in this system degrades to a deterministic answer at
+HTTP 200; one path did not, and it was reachable from ordinary phrasing.
+
+**Consequence:** `_is_title_case` now measures capitalization after the opening word,
+which is capitalized by orthography in every sentence and made short questions look
+title-cased purely for being short. `Did Marco work at Google?` reached the 0.6 ratio and
+skipped entity detection entirely, while `Tell me about Marco's experience at Google.`
+did not — the same entity, two verdicts. Both now return the same not-found naming
+Google, and genuine title-case prose is still skipped.
+
+## D-039: Split conversation state into a single-turn snapshot and an accumulating record
+
+**Status:** Accepted (extends D-022)
+
+`ConversationState` was one layer, overwritten every turn, so the conversation had no
+memory of what it had already said. It now carries two layers with different lifetimes:
+
+- the existing `last_*` fields, still a single-turn snapshot, unchanged in meaning;
+- `focus_source_id`, `delivered_fact_ids`, `discussed_topics`, and
+  `discussed_source_ids`, which accumulate.
+
+**Merged at one exit point, derived from the trace.** The record is assembled in
+`AgentService.respond`, not inside the seven answer paths that build a snapshot. Every
+route already reports what it selected through `selected_fact_ids`, `selected_source_ids`,
+and `answer_topic`, so the record follows from the trace alone and a route added later
+cannot forget to maintain it.
+
+A turn that selects nothing keeps the record and resets the snapshot. Preserving a stale
+`last_entities` through a clarification would let the next "tell me more" resolve against
+a unit from two turns ago instead of asking; preserving the record is the point of having
+one. `focus_source_id` updates only on a turn that delivered facts, and only when those
+facts came from exactly one source root — several roots is an ambiguity, and carrying the
+older focus through would answer about the wrong thing.
+
+**Still no conversation text on the server.** The new identifier fields use a
+`DiscourseId` pattern that admits no whitespace, so message or answer text cannot be
+stored in them whatever a client sends: prose in a state payload is rejected at the API
+contract with HTTP 422. `discussed_topics` is typed as the `AnswerTopic` literal union
+and can hold nothing else. This is derived metadata, not a transcript, and the pattern is
+what makes that structural rather than a convention.
+
+**Client-carried state stays untrusted.** Identifiers arriving from the client are
+filtered against the live fact catalog before use, so a forged or stale record cannot
+claim a fact was delivered that the profile does not define. Caps live on the model
+(`MAX_DELIVERED_FACT_IDS = 64`, `MAX_DISCUSSED_SOURCE_IDS = 32`, and `MAX_DISCUSSED_TOPICS`
+derived from the topic union itself), and the single writer revalidates rather than
+copying, so a cap violation fails in the server rather than shipping to the client.
+
+**Why:** the negative-referent answer added in D-038 can only check the profile, so it
+cannot yet distinguish "I never said that" from "that is not in the profile" for content
+the profile does contain. Deepening a follow-up beyond one hop has the same missing
+foundation. Both need to know what the conversation has already delivered.
+
+**Consequence:** the current profile derives 55 facts in total, so the delivered record
+is lossless today; if the profile outgrows the cap, the oldest deliveries are dropped and
+"already said" degrades toward the recent past rather than failing. Worst-case state is
+roughly 17 KB, bounded entirely by the model's caps — `POST /api/chat` measures its
+size limits against the message and history only.
+
+## D-040: Correct a false premise in front of the answer, never instead of it
+
+**Status:** Accepted (completes D-038 on the foundation of D-039)
+
+An asserted antecedent now resolves to one of three verdicts, and the discourse record
+is what separates them:
+
+- **absent** — the antecedent names nothing in the profile. Every answer is assembled
+  from profile facts alone, so it cannot have been said. Denied outright.
+- **undelivered** — it names real content the record does not show delivered. The
+  premise is false but the content is real.
+- **genuine** — the record shows it delivered, so the ordinary follow-up path owns the
+  turn and nothing is denied.
+
+The `undelivered` verdict is answered, not deflected. Withholding content the profile
+holds because the user misremembered who said it first helps nobody, and a plain denial
+would be the deflection the release gates exist to prevent.
+
+**The correction is prefixed at the single exit point, not rendered separately.** The
+first implementation of this path selected and rendered its own facts, and produced an
+eight-item dump of a whole topic including bare index terms — a worse answer than the
+same question gets without the referent phrase. Prefixing one sentence onto whatever the
+ordinary path produced keeps the selection discipline, the output guard, and the
+rendering mode exactly as they would otherwise be. The trace records the correction in
+`referent_correction` rather than overloading `rendering_mode`, which continues to
+describe how the facts were rendered.
+
+The correction applies only to a turn that actually delivered facts. Prefixing "I haven't
+mentioned that" onto a clarification would add a claim without adding an answer.
+
+**Why:** the transcript that opened D-038 shows the user referring to something never
+said. Denying is right only when the content does not exist; when it does, the useful
+answer is to say the premise is wrong and then answer the question underneath it.
+
+**Consequence:** the verdict depends on client-carried state (D-022). A client that
+drops the record makes every asserted antecedent look undelivered, so the agent adds a
+correction it cannot support. The failure is one unnecessary sentence in front of a
+correct answer, which is why the correction is a prefix rather than a refusal.

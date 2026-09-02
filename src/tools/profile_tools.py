@@ -60,6 +60,11 @@ class ResumeSearchResult(BaseModel):
     matches: list[ResumeFact] = Field(default_factory=list)
     profile_missing: bool = False
     unmatched_terms: list[str] = Field(default_factory=list)
+    """Query terms that matched no candidate fact. A retrieval diagnostic only.
+
+    These are raw terms, not entities: a pronoun, a verb, or a punctuation artifact
+    lands here as readily as a company name. Never render them in an answer.
+    """
 
 
 class ProjectMatch(BaseModel):
@@ -179,6 +184,20 @@ _STOP_WORDS = {
     "at", "with", "for", "on", "from", "to", "of", "did", "do", "does", "was",
     "were", "are", "be", "been", "any", "s", "con", "para", "por", "sobre",
     "desde", "hasta", "ha", "han", "tiene", "fue", "son", "un", "una", "al",
+    # Pronouns and determiners. They carry no retrieval signal, and left in they
+    # both empty a stocked topic and get rendered as if they were missing entities.
+    "he", "him", "his", "she", "her", "hers", "they", "them", "their", "theirs",
+    "it", "its", "we", "us", "our", "this", "that", "these", "those",
+    "su", "sus", "ella", "ellos", "ellas", "nos", "nuestro", "nuestra", "ese",
+    "esa", "eso", "esos", "esas", "este", "esta", "esto", "estos", "estas",
+    # Discourse verbs and reference nouns: they talk about the conversation, not
+    # about the profile.
+    "part", "parte", "where", "donde", "when", "cuando", "say", "says", "said",
+    "dice", "dijo", "dijiste", "mention", "mentions", "mentioned", "menciona",
+    "mencionaste", "more", "mas",
+    # Request verbs naming the corpus or the operation, never a search term.
+    "resume", "resumen", "resumir", "resume.", "summarize", "summary", "dime",
+    "cuentame", "acerca", "give", "show", "please", "por favor",
 }
 
 
@@ -187,7 +206,11 @@ def normalize_resume_text(text: str) -> str:
     decomposed = unicodedata.normalize("NFKD", text.casefold())
     ascii_text = "".join(character for character in decomposed if not unicodedata.combining(character))
     tokens = re.findall(r"[a-z0-9#+.]+", ascii_text)
-    return " ".join(_TOKEN_ALIASES.get(token, token) for token in tokens)
+    # A dot inside a token is part of a product name (asp.net, node.js); a dot at
+    # either edge is sentence punctuation, and leaving it there makes "marco." a
+    # different token from "marco".
+    trimmed = (token.strip(".") for token in tokens)
+    return " ".join(_TOKEN_ALIASES.get(token, token) for token in trimmed if token)
 
 
 _SPANISH_ONLY_CHARACTERS = frozenset("ñáéíóúü¿¡")
@@ -487,12 +510,20 @@ def _profile_known_tokens(profile: Profile) -> set[str]:
 
 
 def _is_title_case(sentence: str) -> bool:
-    """Detect prose where capitalization is stylistic, not a proper-noun signal."""
+    """Detect prose where capitalization is stylistic, not a proper-noun signal.
+
+    The opening word is capitalized by orthography in every sentence, so counting it
+    makes a short question look title-cased purely because it is short: `Did Marco
+    work at Google?` reached the ratio and skipped entity detection entirely, while
+    the same entity in a longer phrasing was caught. Only the words after the
+    opening one carry a stylistic-capitalization signal.
+    """
     words = _WORD_RE.findall(sentence)
     if len(words) < 3:
         return False
-    capitalized = sum(1 for word in words if word[0].isupper())
-    return capitalized / len(words) >= _TITLE_CASE_RATIO
+    body = words[1:]
+    capitalized = sum(1 for word in body if word[0].isupper())
+    return capitalized / len(body) >= _TITLE_CASE_RATIO
 
 
 def find_unknown_entities(profile: Profile, message: str) -> list[str]:

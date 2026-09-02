@@ -28,6 +28,7 @@ from src.agent.contracts import (
     GeneratedResponse,
     Intent,
     IntentDecision,
+    InvalidStructuredOutputError,
 )
 from src.agent.orchestrator import AgentService
 from src.models.profile import load_profile
@@ -351,3 +352,170 @@ def test_language_assertions_discriminate_between_languages() -> None:
     """And the language invariant is only evidence if both verdicts are reachable."""
     assert detect_response_language("Summarize Marco's experience.") == "en"
     assert detect_response_language("Resume la experiencia de Marco.") == "es"
+
+
+# --- #19: the classifier-failure door, negative referents, and term leakage ---
+
+UNROUTABLE_MESSAGES = (
+    # The observed transcript turn that produced no response at all: a reference to
+    # something the agent never said, matching no follow-up phrase and no marker.
+    "The part where it says he worked at google",
+    "La parte donde dice que trabajó en Google",
+    "When you said he led the payments migration",
+    # Deliberately unanchored input, which may be clarified but must never 503.
+    "the part you mentioned",
+    "that bit",
+)
+
+TERM_LEAKAGE_MESSAGES = (
+    "Tell me about his projects",
+    "Resume los proyectos de Marco.",
+)
+
+
+class ClassifierAlwaysFails:
+    """Both classifier attempts return malformed structured output, as observed in #19."""
+
+    def classify(self, message: str, history: list[object]) -> IntentDecision:
+        raise InvalidStructuredOutputError("classifier returned malformed JSON")
+
+
+def answer_without_classifier(message: str) -> object:
+    """Run one full turn with the classifier permanently unavailable."""
+    service = AgentService(
+        profile=load_profile("data/profile.json"),
+        classifier=ClassifierAlwaysFails(),
+        generator=EmptyFactSetIsAFailure(),
+    )
+    return service.respond(message, history=[])
+
+
+@pytest.mark.parametrize(
+    "message",
+    ALL_VARIANTS + UNROUTABLE_MESSAGES,
+    ids=list(ALL_VARIANTS + UNROUTABLE_MESSAGES),
+)
+def test_classifier_failure_degrades_instead_of_reaching_the_503_door(message: str) -> None:
+    """Every boundary degrades to a deterministic HTTP 200; this one must too."""
+    response = answer_without_classifier(message)
+
+    assert response.answer
+
+
+@pytest.mark.parametrize("message", RELEASE_SCRIPT, ids=list(RELEASE_SCRIPT))
+def test_classifier_failure_still_answers_canonical_questions(message: str) -> None:
+    """A question with sufficient canonical facts must not deflect when the model dies."""
+    response = answer_without_classifier(message)
+
+    assert response.trace.rendering_mode != "clarification"
+    assert response.trace.selected_fact_ids
+
+
+def test_the_classifier_failure_double_actually_fails() -> None:
+    """The invariant above is only evidence if the stub really raises."""
+    with pytest.raises(InvalidStructuredOutputError):
+        ClassifierAlwaysFails().classify("x", [])
+
+
+@pytest.mark.parametrize(
+    "message",
+    ("The part where it says he worked at google", "La parte donde dice que trabajó en Google"),
+)
+def test_a_referent_to_something_never_delivered_is_answered_explicitly(message: str) -> None:
+    """A falsified antecedent gets an explicit denial, not a guess or a clarification."""
+    response = answer(message)
+
+    assert response.trace.rendering_mode == "negative_referent"
+    assert response.trace.grounding_status == "referent_missing"
+    assert not response.trace.selected_fact_ids
+
+
+@pytest.mark.parametrize("message", TERM_LEAKAGE_MESSAGES, ids=list(TERM_LEAKAGE_MESSAGES))
+def test_query_terms_are_never_rendered_as_missing_entities(message: str) -> None:
+    """`unmatched_terms` are query residue; a pronoun or verb is not a missing entity."""
+    response = answer(message)
+    normalized = response.answer.casefold()
+
+    for term in ("his", "resume,", "marco."):
+        assert term not in normalized
+
+
+@pytest.mark.parametrize("message", TERM_LEAKAGE_MESSAGES, ids=list(TERM_LEAKAGE_MESSAGES))
+def test_a_pronoun_does_not_make_a_stocked_topic_look_empty(message: str) -> None:
+    """Both phrasings ask for the projects the profile does hold; answer them."""
+    response = answer(message)
+
+    assert response.trace.grounding_status != "profile_missing"
+    assert response.trace.selected_fact_ids
+
+
+@pytest.mark.parametrize(
+    "message",
+    ("Did Marco work at Google?", "Tell me about Marco's experience at Google."),
+)
+def test_the_same_absent_entity_resolves_alike_across_phrasings(message: str) -> None:
+    """Sentence length changed the verdict for Google; only the entity may decide it."""
+    response = answer(message)
+
+    assert response.trace.grounding_status == "profile_missing"
+    assert "Google" in response.answer
+
+
+# --- #19 second half: the record decides whether a referent was ever delivered ---
+
+
+def turn(message: str, state: object | None = None) -> object:
+    """One offline turn that can be handed the state the previous one produced."""
+    service = AgentService(
+        profile=load_profile("data/profile.json"),
+        classifier=StubClassifier(),
+        generator=EmptyFactSetIsAFailure(),
+    )
+    return service.respond(message, history=[], state=state)
+
+
+GLOBAL_PAYMENTS_REFERENT = "The part where it says he worked at Global Payments"
+
+
+def test_a_referent_to_undelivered_profile_content_is_corrected_then_answered() -> None:
+    """The premise is false but the content is real: say so, then answer it."""
+    first = turn("Tell me about Sybil")
+    assert first.state is not None and first.state.delivered_fact_ids
+
+    second = turn(GLOBAL_PAYMENTS_REFERENT, first.state)
+
+    assert second.trace.referent_correction is True
+    assert second.trace.selected_fact_ids
+    assert "Global Payments" in second.answer
+    # The answer below the correction is whatever the ordinary path would have given.
+    assert second.trace.rendering_mode in {"canonical", "rephrased", "transformed"}
+
+
+def test_a_referent_to_content_already_delivered_is_answered_normally() -> None:
+    """Once the record shows it was said, the referent is genuine and needs no denial."""
+    first = turn("Dime acerca de la experiencia de Marco")
+    assert first.state is not None and first.state.delivered_fact_ids
+
+    second = turn(GLOBAL_PAYMENTS_REFERENT, first.state)
+
+    assert second.trace.referent_correction is False
+    assert second.trace.rendering_mode != "negative_referent"
+
+
+def test_the_record_is_what_separates_the_two_verdicts() -> None:
+    """Same message, same profile: only what was delivered may change the answer."""
+    delivered = turn("Dime acerca de la experiencia de Marco").state
+    unrelated = turn("Tell me about Sybil").state
+
+    assert turn(GLOBAL_PAYMENTS_REFERENT, delivered).trace.referent_correction is False
+    assert turn(GLOBAL_PAYMENTS_REFERENT, unrelated).trace.referent_correction is True
+
+
+def test_an_antecedent_absent_from_the_profile_is_still_denied_outright() -> None:
+    """The stronger claim survives: never said, and never in the profile either."""
+    first = turn("Tell me about Sybil")
+
+    second = turn("The part where it says he worked at google", first.state)
+
+    assert second.trace.rendering_mode == "negative_referent"
+    assert not second.trace.selected_fact_ids
