@@ -48,6 +48,8 @@ class SearchResumeArguments(BaseModel):
     topic: ResumeTopic | None = None
     source_ids: list[str] = Field(default_factory=list)
     exclude_source_ids: list[str] = Field(default_factory=list)
+    exclude_fact_ids: list[str] = Field(default_factory=list)
+    response_language: Literal["en", "es"] | None = None
     limit: int = Field(default=8, ge=1, le=20)
 
 
@@ -194,10 +196,10 @@ _STOP_WORDS = {
     # about the profile.
     "part", "parte", "where", "donde", "when", "cuando", "say", "says", "said",
     "dice", "dijo", "dijiste", "mention", "mentions", "mentioned", "menciona",
-    "mencionaste", "more", "mas",
+    "mencionaste", "more", "mas", "else",
     # Request verbs naming the corpus or the operation, never a search term.
     "resume", "resumen", "resumir", "resume.", "summarize", "summary", "dime",
-    "cuentame", "acerca", "give", "show", "please", "por favor",
+    "cuentame", "platicame", "sabes", "acerca", "give", "show", "please", "por favor",
 }
 
 
@@ -602,6 +604,11 @@ def search_resume(profile: Profile, arguments: SearchResumeArguments) -> ResumeS
             for fact in candidates
             if fact.source_id not in arguments.exclude_source_ids
         ]
+    if arguments.exclude_fact_ids:
+        excluded_fact_ids = set(arguments.exclude_fact_ids)
+        candidates = [
+            fact for fact in candidates if fact.fact_id not in excluded_fact_ids
+        ]
     topic_words = {
         word
         for phrase in _TOPIC_PHRASES[topic]
@@ -630,7 +637,7 @@ def search_resume(profile: Profile, arguments: SearchResumeArguments) -> ResumeS
         candidates = []
     return ResumeSearchResult(
         query=arguments.query,
-        language=detect_response_language(arguments.query),
+        language=arguments.response_language or detect_response_language(arguments.query),
         topic=topic,
         matches=candidates[: arguments.limit],
         profile_missing=not candidates,

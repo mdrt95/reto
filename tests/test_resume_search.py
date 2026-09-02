@@ -102,6 +102,35 @@ def test_missing_career_preferences_are_explicit() -> None:
     assert result.profile_missing is True
 
 
+def test_universal_search_can_exclude_delivered_facts_without_excluding_the_unit() -> None:
+    """Deepening stays inside one entity while advancing past individual facts."""
+    profile = load_profile("data/profile.json")
+    initial = search_resume(
+        profile,
+        SearchResumeArguments(
+            query="Sybil",
+            topic="projects",
+            source_ids=["project:proj-sybil"],
+            limit=1,
+        ),
+    )
+
+    result = search_resume(
+        profile,
+        SearchResumeArguments(
+            query="Sybil",
+            topic="projects",
+            source_ids=["project:proj-sybil"],
+            exclude_fact_ids=[initial.matches[0].fact_id],
+            limit=1,
+        ),
+    )
+
+    assert len(result.matches) == 1
+    assert result.matches[0].fact_id != initial.matches[0].fact_id
+    assert result.matches[0].source_id.startswith("project:proj-sybil")
+
+
 @pytest.mark.parametrize(
     ("message", "expected"),
     [
