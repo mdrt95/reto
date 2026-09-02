@@ -1525,3 +1525,120 @@ def test_summary_fallback_uses_spanish_narrative_for_spanish_request() -> None:
     response = service.respond("Resume la experiencia de Marco", history=[])
 
     assert expected_narrative in response.answer
+
+
+class EmptyFactRecordingGenerator:
+    """Generator double that records the fact-set size of every invocation."""
+
+    def __init__(self) -> None:
+        self.allowed_fact_counts: list[int] = []
+
+    def generate(self, **kwargs: object) -> GeneratedResponse:
+        allowed_facts = kwargs.get("allowed_facts") or []
+        self.allowed_fact_counts.append(len(allowed_facts))
+        return GeneratedResponse(
+            text="Marco led the security console work at Global Payments.",
+            claims=[
+                Claim(
+                    text="Marco led the security console work at Global Payments.",
+                    kind=ClaimKind.DIRECT,
+                    source_ids=["experience:exp-global-payments"],
+                    evidence=["security console"],
+                )
+            ],
+        )
+
+
+class BroadSearchClassifier:
+    """Model-shaped broad search intent carrying no typed filter plan."""
+
+    def classify(self, message: str, history: list[object]) -> IntentDecision:
+        return IntentDecision(intent=Intent.SEARCH_QUERY, confidence=0.95)
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Cuales son los logros de Marco?",
+        "What are Marco's achievements?",
+        "Desde cuando Marco trabaja ahi?",
+        "Dónde estudió Marco?",
+        "¿Qué estudios tiene Marco?",
+    ],
+)
+def test_zero_selection_never_invokes_the_generator_with_an_empty_fact_set(
+    message: str,
+) -> None:
+    """A routing miss must never ask the generator for claims it cannot ground."""
+    generator = EmptyFactRecordingGenerator()
+    service = AgentService(
+        profile=load_profile("data/profile.json"),
+        classifier=BroadSearchClassifier(),
+        generator=generator,
+    )
+
+    response = service.respond(message, history=[])
+
+    assert 0 not in generator.allowed_fact_counts
+    assert response.answer
+    assert response.trace.selection_path in {"primary", "recovery", "none"}
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Cuales son los logros de Marco?",
+        "What are Marco's achievements?",
+        "Desde cuando Marco trabaja ahi?",
+    ],
+)
+def test_unanchored_zero_selection_clarifies_without_substituting_facts(
+    message: str,
+) -> None:
+    """With no resolvable topic anchor, recovery must not return top-ranked facts."""
+    service = AgentService(
+        profile=load_profile("data/profile.json"),
+        classifier=BroadSearchClassifier(),
+        generator=EmptyFactRecordingGenerator(),
+    )
+
+    response = service.respond(message, history=[])
+
+    assert response.trace.rendering_mode == "clarification"
+    assert response.trace.selected_fact_ids == []
+    assert response.trace.selection_path == "none"
+
+
+def test_anchored_zero_selection_recovers_within_the_anchored_topic() -> None:
+    """A resolved topic anchor may recover facts, but only from that topic."""
+    profile = load_profile("data/profile.json")
+    service = AgentService(
+        profile=profile,
+        classifier=BroadSearchClassifier(),
+        generator=EmptyFactRecordingGenerator(),
+    )
+
+    response = service.respond("¿Qué estudios tiene Marco?", history=[])
+
+    assert response.trace.selection_path == "recovery"
+    assert response.trace.answer_topic == "education"
+    catalog = {fact.fact_id: fact for fact in build_resume_fact_catalog(profile)}
+    assert response.trace.selected_fact_ids
+    assert all(
+        catalog[fact_id].topic == "education"
+        for fact_id in response.trace.selected_fact_ids
+    )
+
+
+def test_ordinary_success_records_the_primary_selection_path() -> None:
+    """Recovery must be countable, so ordinary success carries its own path label."""
+    service = AgentService(
+        profile=load_profile("data/profile.json"),
+        classifier=BroadSearchClassifier(),
+        generator=EmptyFactRecordingGenerator(),
+    )
+
+    response = service.respond("What education does Marco have?", history=[])
+
+    assert response.trace.selected_fact_ids
+    assert response.trace.selection_path == "primary"

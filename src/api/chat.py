@@ -180,6 +180,7 @@ def chat(payload: ChatRequest, request: Request) -> ChatResponse:
             rephrase_outcome=result.trace.rephrase_outcome,
             fallback_reason=result.trace.fallback_reason,
             generator_skipped=result.trace.generator_skipped,
+            selection_path=result.trace.selection_path,
             answer_mode=result.trace.answer_mode,
             rendering_mode=result.trace.rendering_mode,
             synthesis_dimension=result.trace.synthesis_dimension,

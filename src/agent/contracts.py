@@ -200,6 +200,7 @@ class AgentTrace(BaseModel):
     rephrase_outcome: str | None = None
     fallback_reason: str | None = None
     generator_skipped: bool = False
+    selection_path: Literal["primary", "recovery", "none"] | None = None
     answer_mode: str | None = None
     rendering_mode: str | None = None
     answer_topic: str | None = None

@@ -474,6 +474,17 @@ def _detect_topic(normalized_query: str, catalog: list[ResumeFact]) -> ResumeTop
     return None
 
 
+def detect_resume_topic(profile: Profile, message: str) -> ResumeTopic | None:
+    """Resolve the topic a message anchors to, or None when no anchor is evidenced.
+
+    `search_resume` deliberately widens an unresolved anchor to the broad `summary`
+    topic so it always returns something. A caller deciding whether recovery is even
+    permitted must see the unresolved case, because substituting summary facts for an
+    unanchored question is how unrelated facts reach an answer.
+    """
+    return _detect_topic(normalize_resume_text(message), build_resume_fact_catalog(profile))
+
+
 def search_resume(profile: Profile, arguments: SearchResumeArguments) -> ResumeSearchResult:
     """Search every public resume domain using a derived, normalized fact catalog."""
     catalog = build_resume_fact_catalog(profile)
