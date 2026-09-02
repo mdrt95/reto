@@ -76,6 +76,36 @@ _SUMMARY_FIELD_MARKERS: dict[str, tuple[str, ...]] = {
 _GENERATION_LOGGER = logging.getLogger("banorte_cv_agent.generation")
 
 
+_FEEDBACK_TEMPLATES = {
+    "unsupported_vocabulary": (
+        "The previous answer used wording that does not appear in the supplied facts: "
+        "{details}. Rewrite it using only wording drawn from the facts, and list in "
+        "`fact_ids` every fact each proposition takes wording from."
+    ),
+    "verb_drift": (
+        "The previous answer changed what Marco did: {details}. Reuse each cited fact's "
+        "own verb instead of a stronger, weaker, or different one."
+    ),
+    "too_long": (
+        "The previous answer was over budget: {details}. Rewrite it shorter, keeping "
+        "only the most representative evidence."
+    ),
+}
+_DEFAULT_FEEDBACK = (
+    "The previous answer was rejected ({code}: {details}). Rewrite it staying strictly "
+    "inside the supplied facts and within every stated limit."
+)
+
+
+def _transformation_feedback(code: str, details: list[str]) -> str:
+    """Turn one deterministic rejection into a correction the provider can act on."""
+    joined = "; ".join(details) if details else "no further detail"
+    template = _FEEDBACK_TEMPLATES.get(code)
+    if template is not None:
+        return template.format(details=joined)
+    return _DEFAULT_FEEDBACK.format(code=code, details=joined)
+
+
 def _fallback_reason_for(
     error: GenerationUnavailableError,
     *,
@@ -755,6 +785,66 @@ class AgentService:
                 return result
         return None
 
+    def _verify_transformation(
+        self,
+        *,
+        candidate: SynthesisTransformation,
+        answer_plan: AnswerPlan,
+        catalog: dict[str, ResumeFact],
+        selected_facts: list[ResumeFact],
+        message: str,
+    ) -> tuple[str, str, list[str]]:
+        """Return one transformation's verdict code, delivery text, and rejection detail.
+
+        Checks run narrowest first: fact mapping, then each proposition against the facts
+        it cites, then the assembled answer's structure and whole-answer containment.
+        """
+        selected_ids = set(answer_plan.selected_fact_ids)
+        mapped_text = " ".join(
+            proposition.text.strip() for proposition in candidate.propositions
+        )
+        mappings_are_valid = all(
+            proposition.fact_ids and set(proposition.fact_ids) <= selected_ids
+            for proposition in candidate.propositions
+        )
+        if not mappings_are_valid:
+            return "missing_fact_ids", mapped_text, []
+        assert answer_plan.synthesis_dimension is not None
+        for proposition in candidate.propositions:
+            verdict = verify_synthesis_text(
+                text=proposition.text,
+                selected_facts=[catalog[fact_id] for fact_id in proposition.fact_ids],
+                vocabulary_facts=selected_facts,
+                catalog=list(catalog.values()),
+                language=answer_plan.language,
+                dimension=answer_plan.synthesis_dimension,
+            )
+            if not verdict.allowed:
+                return verdict.code, mapped_text, verdict.details
+        structure_verdict = verify_synthesis_structure(
+            text=mapped_text,
+            proposition_fact_ids=[
+                proposition.fact_ids for proposition in candidate.propositions
+            ],
+            proposition_texts=[
+                proposition.text for proposition in candidate.propositions
+            ],
+            dimension=answer_plan.synthesis_dimension,
+            detail_requested=self._answer_planner.detail_requested(message),
+        )
+        if not structure_verdict.allowed:
+            return structure_verdict.code, mapped_text, structure_verdict.details
+        whole_verdict = verify_synthesis_text(
+            text=mapped_text,
+            selected_facts=selected_facts,
+            catalog=list(catalog.values()),
+            language=answer_plan.language,
+            dimension=answer_plan.synthesis_dimension,
+        )
+        if not whole_verdict.allowed:
+            return whole_verdict.code, mapped_text, whole_verdict.details
+        return "accepted", mapped_text, []
+
     def _bounded_synthesis_response(
         self,
         *,
@@ -796,81 +886,48 @@ class AgentService:
             rephrase_outcome = "rejected:missing_impact_evidence"
             generator_skipped = True
         elif self._rephraser is not None:
-            try:
-                candidate = self._rephraser.rephrase(
-                    message=message,
-                    facts=selected_facts,
-                    language=answer_plan.language,
-                )
-            except GenerationUnavailableError as error:
-                reason = _fallback_reason_for(error, stage="rephraser")
-                _log_generation_fallback(reason, stage="rephraser")
-                fallback_reason = fallback_reason or reason
-                rephrase_outcome = reason
-                transformation_outcome = f"unavailable:{reason}"
-            else:
-                selected_ids = set(answer_plan.selected_fact_ids)
-                mappings_are_valid = all(
-                    proposition.fact_ids
-                    and set(proposition.fact_ids) <= selected_ids
-                    for proposition in candidate.propositions
-                )
-                mapped_text = " ".join(
-                    proposition.text.strip() for proposition in candidate.propositions
-                )
-                proposition_verdicts = [
-                    verify_synthesis_text(
-                        text=proposition.text,
-                        selected_facts=[catalog[fact_id] for fact_id in proposition.fact_ids],
-                        catalog=list(catalog.values()),
+            feedback: str | None = None
+            mapped_text = ""
+            verdict_code = "accepted"
+            for attempt in range(2):
+                try:
+                    candidate = self._rephraser.rephrase(
+                        message=message,
+                        facts=selected_facts,
                         language=answer_plan.language,
-                        dimension=answer_plan.synthesis_dimension,
+                        # Omitted on the first attempt so a provider adapter without a
+                        # corrective parameter still satisfies the interface.
+                        **({"feedback": feedback} if feedback else {}),
                     )
-                    for proposition in candidate.propositions
-                    if mappings_are_valid
-                ]
-                if not mappings_are_valid:
-                    verdict_code = "missing_fact_ids"
-                else:
-                    rejected = next(
-                        (verdict for verdict in proposition_verdicts if not verdict.allowed),
-                        None,
-                    )
-                    if rejected is not None:
-                        verdict_code = rejected.code
-                    else:
-                        structure_verdict = verify_synthesis_structure(
-                            text=mapped_text,
-                            proposition_fact_ids=[
-                                proposition.fact_ids for proposition in candidate.propositions
-                            ],
-                            proposition_texts=[
-                                proposition.text for proposition in candidate.propositions
-                            ],
-                            dimension=answer_plan.synthesis_dimension,
-                            detail_requested=self._answer_planner.detail_requested(message),
-                        )
-                        if not structure_verdict.allowed:
-                            verdict_code = structure_verdict.code
-                        else:
-                            whole_verdict = verify_synthesis_text(
-                                text=mapped_text,
-                                selected_facts=selected_facts,
-                                catalog=list(catalog.values()),
-                                language=answer_plan.language,
-                                dimension=answer_plan.synthesis_dimension,
-                            )
-                            verdict_code = (
-                                "accepted" if whole_verdict.allowed else whole_verdict.code
-                            )
+                except GenerationUnavailableError as error:
+                    reason = _fallback_reason_for(error, stage="rephraser")
+                    _log_generation_fallback(reason, stage="rephraser")
+                    fallback_reason = fallback_reason or reason
+                    rephrase_outcome = reason
+                    transformation_outcome = f"unavailable:{reason}"
+                    break
+                verdict_code, mapped_text, details = self._verify_transformation(
+                    candidate=candidate,
+                    answer_plan=answer_plan,
+                    catalog=catalog,
+                    selected_facts=selected_facts,
+                    message=message,
+                )
                 if verdict_code == "accepted":
                     answer = mapped_text
                     rephrase_outcome = "accepted"
-                    transformation_outcome = "accepted"
-                else:
-                    rephrase_outcome = f"rejected:{verdict_code}"
-                    fallback_reason = fallback_reason or f"synthesis_rejected:{verdict_code}"
-                    transformation_outcome = rephrase_outcome
+                    transformation_outcome = (
+                        "accepted" if attempt == 0 else "accepted_after_correction"
+                    )
+                    break
+                # The gate already names what was wrong, so one corrective attempt is
+                # worth more than loosening a check. A provider that cannot use that
+                # feedback will not succeed by plain repetition either, so never more.
+                feedback = _transformation_feedback(verdict_code, details)
+            else:
+                rephrase_outcome = f"rejected:{verdict_code}"
+                fallback_reason = fallback_reason or f"synthesis_rejected:{verdict_code}"
+                transformation_outcome = rephrase_outcome
         else:
             try:
                 generated = self._generator.generate(
@@ -914,6 +971,7 @@ class AgentService:
                         verify_synthesis_text(
                             text=claim.text,
                             selected_facts=[catalog[fact_id] for fact_id in claim.fact_ids],
+                            vocabulary_facts=selected_facts,
                             catalog=list(catalog.values()),
                             language=answer_plan.language,
                             dimension=answer_plan.synthesis_dimension,

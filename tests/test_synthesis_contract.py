@@ -124,6 +124,8 @@ class RecordingTransformation:
         message: str,
         facts: list[ResumeFact],
         language: str,
+
+        feedback: str | None = None,
     ) -> SynthesisTransformation:
         self.calls.append({"message": message, "facts": facts, "language": language})
         return SynthesisTransformation(
@@ -255,7 +257,8 @@ def test_synthesis_outage_or_rejection_returns_one_concise_canonical_boundary(
 
     response = service.respond(message, history=[])
 
-    assert transformer.calls == 1
+    # An outage is terminal; a rejection earns exactly one corrective attempt.
+    assert transformer.calls == (1 if mode == "outage" else 2)
     assert response.trace.answer_mode == "synthesis"
     assert response.trace.rendering_mode == "canonical_fallback"
     assert response.trace.transformation_outcome.startswith(
@@ -580,6 +583,8 @@ class MultiPropositionTransformation:
         message: str,
         facts: list[ResumeFact],
         language: str,
+
+        feedback: str | None = None,
     ) -> SynthesisTransformation:
         self.facts = facts
         return SynthesisTransformation(
@@ -639,3 +644,49 @@ def test_a_full_selection_cannot_be_delivered_as_one_proposition_per_fact() -> N
             summarize_profile(profile, SummarizeProfileArguments(audience="recruiter")),
         )
         assert len(plan.selected_fact_ids) <= MAX_SYNTHESIS_FACTS, message
+
+
+class CorrectableTransformation:
+    """Reject the first attempt, then answer inside the gate once told what was wrong."""
+
+    def __init__(self) -> None:
+        self.feedback: list[str | None] = []
+
+    def rephrase(self, **kwargs: object) -> SynthesisTransformation:
+        feedback = kwargs.get("feedback")
+        assert isinstance(feedback, (str, type(None)))
+        self.feedback.append(feedback)
+        if feedback is None:
+            return SynthesisTransformation(
+                propositions=[
+                    SynthesisProposition(
+                        text="Marco spearheaded a Kubernetes migration.",
+                        fact_ids=["fact:experience:exp-global-payments"],
+                    )
+                ]
+            )
+        return SynthesisTransformation(
+            propositions=[
+                SynthesisProposition(
+                    text="Marco works as a Jr. .NET Developer at Global Payments.",
+                    fact_ids=["fact:experience:exp-global-payments"],
+                )
+            ]
+        )
+
+
+def test_a_rejected_transformation_earns_one_corrective_attempt() -> None:
+    """The gate already names the defect; sending it back beats loosening the gate."""
+    transformer = CorrectableTransformation()
+
+    response = AgentService(
+        profile=load_profile("data/profile.json"),
+        classifier=SynthesisClassifier(),
+        generator=GeneratorMustNotRun(),
+        rephraser=transformer,
+    ).respond("Summarize Marco's experience.", history=[])
+
+    assert transformer.feedback[0] is None
+    assert transformer.feedback[1]
+    assert response.trace.rendering_mode == "transformed"
+    assert response.trace.transformation_outcome == "accepted_after_correction"

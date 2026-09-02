@@ -270,3 +270,43 @@ def test_a_possessive_s_is_tokenization_residue_not_a_claim(
     )
 
     assert verdict.allowed, verdict.details
+
+
+def test_a_proposition_may_use_wording_from_elsewhere_in_the_same_selection(
+    catalog: list[ResumeFact],
+) -> None:
+    """Vocabulary is bounded by the turn's selection; attribution stays per proposition.
+
+    Compression draws connective wording across the facts it aggregates. Entity
+    leakage, verb drift, escalation, and invented outcomes remain checked against
+    the facts the proposition actually cites.
+    """
+    sybil = _fact(catalog, "project:proj-sybil")
+    hybrid = _fact(catalog, "project:proj-sybil.highlight:sybil-hl-hybrid")
+
+    verdict = verify_synthesis_text(
+        text="Sybil merges semantic vector search with full-text search.",
+        selected_facts=[sybil],
+        vocabulary_facts=[sybil, hybrid],
+        catalog=catalog,
+        language="en",
+        dimension="summary",
+    )
+
+    assert verdict.allowed, verdict.details
+
+
+def test_wording_outside_the_selection_is_still_rejected(catalog: list[ResumeFact]) -> None:
+    """Widening to the selection is not widening to the whole profile."""
+    sybil = _fact(catalog, "project:proj-sybil")
+
+    verdict = verify_synthesis_text(
+        text="Sybil supports merchant onboarding for point-of-sale devices.",
+        selected_facts=[sybil],
+        vocabulary_facts=[sybil],
+        catalog=catalog,
+        language="en",
+        dimension="summary",
+    )
+
+    assert not verdict.allowed

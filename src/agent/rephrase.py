@@ -280,6 +280,9 @@ _FUNCTION_TOKENS = {
     "como", "en", "de", "del", "al", "por", "para", "con", "sin", "que", "quien",
     "su", "sus", "este", "esta", "estos", "estas", "lo", "se", "ha", "han", "fue",
     "es", "son", "siendo", "mediante", "desde", "hasta", "sobre",
+    "work", "works", "worked", "working",
+    "trabajo", "trabaja", "trabajado", "trabajar",
+    "entre", "tambien", "asi", "muy", "toda", "todo", "todos", "todas",
     "s", "per", "each", "both", "such", "than", "then", "not", "no", "more", "most",
     "other", "another", "after", "before", "during", "within", "where", "when",
     "cada", "ambos", "tanto", "ademas", "antes", "despues", "durante", "dentro",
@@ -327,7 +330,7 @@ _INFLECTION_SUFFIXES = (
     "andose", "iendose", "ando", "iendo", "ciones", "cion",
     "ados", "adas", "idos", "idas", "ado", "ada", "ido", "ida",
     "amos", "emos", "imos", "aron", "ieron", "aban", "abas", "aba", "eron",
-    "ar", "er", "ir", "io", "os", "as", "o", "a",
+    "ar", "er", "ir", "io", "os", "as", "o", "a", "e",
 )
 _MINIMUM_STEM_LENGTH = 4
 
@@ -348,8 +351,17 @@ def verify_synthesis_text(
     catalog: list[ResumeFact],
     language: Literal["en", "es"],
     dimension: SynthesisDimension,
+    vocabulary_facts: list[ResumeFact] | None = None,
 ) -> RephraseVerdict:
-    """Gate compressed synthesis without requiring one sentence for every fact."""
+    """Gate compressed synthesis without requiring one sentence for every fact.
+
+    `selected_facts` is the evidence this text is attributed to; entity leakage, verb
+    drift, escalation, and length are judged against it. `vocabulary_facts` is the
+    turn's whole authorized selection and bounds word choice, because compression
+    draws connective wording across the facts it aggregates. It defaults to
+    `selected_facts`, which keeps both boundaries identical for a whole-answer check.
+    """
+    authorized_facts = vocabulary_facts if vocabulary_facts is not None else selected_facts
     verdict = verify_rephrase(
         text=text,
         selected_facts=selected_facts,
@@ -374,7 +386,7 @@ def verify_synthesis_text(
 
     selected_tokens = {
         token.rstrip(".")
-        for fact in selected_facts
+        for fact in authorized_facts
         for token in _fact_vocabulary(fact)
     }
     answer_token_list = [
@@ -385,7 +397,7 @@ def verify_synthesis_text(
         selected_tokens
         | _FUNCTION_TOKENS
         | _NAME_TOKENS
-        | _authorized_verb_forms(selected_facts)
+        | _authorized_verb_forms(authorized_facts)
     )
     authorized_stems = {
         stem for token in authorized_tokens for stem in _word_stems(token)
@@ -405,8 +417,8 @@ def verify_synthesis_text(
     expected_markers = answer_tokens & _LANGUAGE_MARKERS[language]
     other_language: Literal["en", "es"] = "es" if language == "en" else "en"
     other_markers = answer_tokens & _LANGUAGE_MARKERS[other_language]
-    expected_vocabulary = _language_vocabulary(selected_facts, language)
-    other_vocabulary = _language_vocabulary(selected_facts, other_language)
+    expected_vocabulary = _language_vocabulary(authorized_facts, language)
+    other_vocabulary = _language_vocabulary(authorized_facts, other_language)
     expected_exclusive = answer_tokens & (expected_vocabulary - other_vocabulary)
     other_exclusive = answer_tokens & (other_vocabulary - expected_vocabulary)
     if (

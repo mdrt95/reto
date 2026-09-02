@@ -1022,6 +1022,8 @@ class _FixedTextRephraser:
         message: str,
         facts: list[ResumeFact],
         language: str,
+
+        feedback: str | None = None,
     ) -> SynthesisTransformation:
         self.calls.append({"message": message, "facts": facts, "language": language})
         return SynthesisTransformation(
