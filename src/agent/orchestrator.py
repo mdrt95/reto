@@ -54,6 +54,7 @@ from src.tools.profile_tools import (
     filter_experience,
     build_resume_fact_catalog,
     detect_response_language,
+    detect_resume_topic,
     fact_display_text,
     find_unknown_entities,
     normalize_resume_text,
@@ -62,6 +63,20 @@ from src.tools.profile_tools import (
     search_resume,
     summarize_profile,
 )
+
+_REFERENT_PHRASES = (
+    "the part where it says", "the part where you said", "the part that says",
+    "the bit where it says", "when you said", "where you said",
+    "where you mentioned", "when you mentioned", "you said that", "you mentioned that",
+    "la parte donde dice", "la parte donde dijiste", "la parte que dice",
+    "cuando dijiste", "donde dijiste", "donde mencionaste", "cuando mencionaste",
+    "dijiste que", "mencionaste que",
+)
+"""Phrases that assert a specific antecedent was already said.
+
+Only phrases carrying their antecedent inline qualify. A bare referent ("that bit")
+names nothing checkable and must stay on the clarification path.
+"""
 
 _RANKING_MARKERS = (
     "rank", "ranking", "best to worst", "worst to best",
@@ -254,6 +269,10 @@ class AgentService:
                 trace=AgentTrace(guardrail_input="blocked"),
             )
 
+        negative_referent = self._negative_referent_response(message, state)
+        if negative_referent is not None:
+            return negative_referent
+
         unknown_entities = find_unknown_entities(self._profile, message)
         if unknown_entities:
             language = detect_response_language(message)
@@ -332,7 +351,13 @@ class AgentService:
                 decision = IntentDecision(intent=Intent.DIRECT_QUESTION, confidence=1.0)
             if decision is None:
                 if follow_up is None and self._resume_search_arguments(message, state) is None:
-                    raise
+                    # The classifier only ever chose a tool; it never chose the facts.
+                    # An anchor evidenced in the message is enough to answer without it,
+                    # and anything less deflects at HTTP 200 like every other boundary.
+                    topic = detect_resume_topic(self._profile, message)
+                    if topic is None:
+                        return self._unclassified_response(message, state, fallback_reason)
+                    follow_up = SearchResumeArguments(query=message, topic=topic)
                 decision = IntentDecision(intent=Intent.FOLLOW_UP, confidence=1.0)
         if explicit_plan is not None:
             explicit_response = self._direct_plan_response(
@@ -1524,6 +1549,93 @@ class AgentService:
         lines.extend(f"- {fact_display_text(match, result.language)}" for match in result.matches)
         return "\n".join(lines)
 
+    def _unclassified_response(
+        self,
+        message: str,
+        state: ConversationState | None,
+        fallback_reason: str | None,
+    ) -> AgentResponse:
+        """Deflect deterministically when nothing local can resolve what was asked.
+
+        Every other boundary in this system answers at HTTP 200. A classifier that
+        returns malformed output twice is a provider problem, and the user sees a
+        frontend rendering nothing at all when it becomes a 503.
+        """
+        language = detect_response_language(message)
+        boundary_plan = self._answer_planner.boundary_plan(message, state)
+        answer = (
+            "¿Podrías aclarar a qué parte del perfil profesional de Marco te refieres?"
+            if language == "es"
+            else "Could you clarify which part of Marco's professional profile you mean?"
+        )
+        return AgentResponse(
+            answer=answer,
+            trace=AgentTrace(
+                grounding_status="clarification",
+                fallback_reason=fallback_reason,
+                **plan_trace_fields(boundary_plan, "clarification"),
+            ),
+            state=state,
+        )
+
+    def _negative_referent_response(
+        self,
+        message: str,
+        state: ConversationState | None,
+    ) -> AgentResponse | None:
+        """Deny an antecedent this agent could never have delivered.
+
+        `The part where it says he worked at Google` asserts something was said. The
+        agent can already answer "that entity is not in the profile", but had no way
+        to answer "I never said that", so the turn fell through to a guess or a 503.
+        An antecedent naming nothing the profile contains was never delivered, because
+        every answer is assembled from profile facts alone.
+        """
+        normalized = " ".join(message.casefold().split())
+        antecedent: str | None = None
+        for phrase in _REFERENT_PHRASES:
+            position = normalized.find(phrase)
+            if position == -1:
+                continue
+            clause = normalized[position + len(phrase):].strip(" ,.;:¿?¡!")
+            if clause:
+                antecedent = clause
+                break
+        if antecedent is None:
+            return None
+        probe = search_resume(self._profile, SearchResumeArguments(query=antecedent))
+        if not probe.profile_missing:
+            return None
+        language = detect_response_language(message)
+        boundary_plan = self._answer_planner.boundary_plan(message, state)
+        # The original casing carries the entity signal the normalized clause lost.
+        entities = find_unknown_entities(self._profile, message)
+        if entities:
+            named = ", ".join(entities)
+            answer = (
+                f"No he dicho nada sobre {named}, y no aparece en el perfil de Marco, "
+                "así que no hay nada a lo que pueda referirme."
+                if language == "es"
+                else f"I haven't said anything about {named}, and it isn't in Marco's "
+                "profile, so there's nothing for me to refer back to."
+            )
+        else:
+            answer = (
+                "No he dicho eso: nada en el perfil de Marco corresponde a esa parte, "
+                "así que no hay nada a lo que pueda referirme."
+                if language == "es"
+                else "I haven't said that — nothing in Marco's profile corresponds to "
+                "it, so there's nothing for me to refer back to."
+            )
+        return AgentResponse(
+            answer=answer,
+            trace=AgentTrace(
+                grounding_status="referent_missing",
+                **plan_trace_fields(boundary_plan, "negative_referent"),
+            ),
+            state=state,
+        )
+
     def _profile_missing_response(
         self,
         decision: IntentDecision,
@@ -1531,8 +1643,11 @@ class AgentService:
         tool_name: str,
         answer_plan: AnswerPlan,
     ) -> AgentResponse:
-        if result.unmatched_terms:
-            entities = ", ".join(result.unmatched_terms)
+        # `unmatched_terms` is raw query residue, not entities — naming it produced
+        # "I couldn't find anything about his". Entity naming has exactly one source.
+        missing_entities = find_unknown_entities(self._profile, result.query)
+        if missing_entities:
+            entities = ", ".join(missing_entities)
             answer = (
                 f"No encontré nada sobre {entities} en el perfil de Marco, así que no "
                 "puedo opinar al respecto."

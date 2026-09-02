@@ -79,7 +79,11 @@ def test_normalization_handles_accents_punctuation_and_synonyms() -> None:
 
 
 def test_unmatched_named_entity_term_is_reported() -> None:
-    """A search term absent from every candidate must be surfaced for boundary wording."""
+    """A search term absent from every candidate is reported as a retrieval diagnostic.
+
+    Never as boundary wording: these are raw terms, and a pronoun lands here as readily
+    as a company name. `find_unknown_entities` is the only source of a named entity.
+    """
     profile = load_profile("data/profile.json")
 
     result = search_resume(profile, SearchResumeArguments(query="experience at Google"))
@@ -105,6 +109,12 @@ def test_missing_career_preferences_are_explicit() -> None:
         ("Does Marco know Node.js?", []),
         ("Has Marco used ASP.NET Core?", []),
         ("What Is Marco's Role?", []),
+        # A short question is capitalization-heavy only because it opens a sentence;
+        # that position carries no proper-noun signal and must not skip detection.
+        ("Did Marco work at Google?", ["Google"]),
+        # Negative control: genuine title-case prose is still skipped, so the fix
+        # above narrows the heuristic rather than disabling it.
+        ("Senior Backend Engineer At Google", []),
         ("Did Marco work at Banorte or Microsoft?", ["Banorte", "Microsoft"]),
         ("Tell me about Sybil and FAISS.", []),
     ],

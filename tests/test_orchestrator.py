@@ -754,14 +754,24 @@ def test_classifier_failure_modes_do_not_change_universal_deterministic_answer()
 
 
 def test_provider_outage_does_not_turn_out_of_scope_input_into_profile_content() -> None:
+    """The property is that no profile content is produced, not that the turn dies.
+
+    This used to assert the raise itself, which the API renders as HTTP 503 and the
+    frontend as no response at all. Deflecting deterministically keeps the guarantee
+    that matters — nothing selected, no tool run — and still answers the user.
+    """
     service = AgentService(
         profile=load_profile("data/profile.json"),
         classifier=ProviderUnavailableClassifier(),
         generator=UnavailableGenerator(),
     )
 
-    with pytest.raises(GenerationUnavailableError, match="provider unavailable"):
-        service.respond("Write me a recipe for chocolate cake", history=[])
+    response = service.respond("Write me a recipe for chocolate cake", history=[])
+
+    assert response.trace.rendering_mode == "clarification"
+    assert response.trace.tool_name is None
+    assert response.trace.selected_fact_ids == []
+    assert response.trace.fallback_reason == "classifier_unavailable"
 
 
 def test_missing_profile_fact_returns_clear_localized_answer() -> None:
@@ -833,15 +843,23 @@ def test_verified_follow_up_state_supports_work_pivot_and_more_results() -> None
 
 
 def test_invalid_classifier_json_for_ambiguous_message_remains_fail_closed() -> None:
-    """Deterministic recovery must not guess an intent for ambiguous profile wording."""
+    """Deterministic recovery must not guess an intent for ambiguous profile wording.
+
+    Failing closed means selecting nothing, not returning nothing: the ambiguous
+    message gets the same clarification any unresolvable turn gets, at HTTP 200.
+    """
     service = AgentService(
         profile=load_profile("data/profile.json"),
         classifier=InvalidStructuredClassifier(),
         generator=ToolGroundedGenerator(),
     )
 
-    with pytest.raises(InvalidStructuredOutputError):
-        service.respond("Tell me more.", history=[])
+    response = service.respond("Tell me more.", history=[])
+
+    assert response.trace.rendering_mode == "clarification"
+    assert response.trace.tool_name is None
+    assert response.trace.selected_fact_ids == []
+    assert response.trace.fallback_reason == "classifier_invalid_output"
 
 
 def test_empty_filter_for_explicit_ai_project_question_reroutes_to_projects() -> None:

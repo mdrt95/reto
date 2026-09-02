@@ -480,3 +480,51 @@ surfaced one live defect: Spanish summary recognition keyed on the fixed phrase
 selected five unrelated experience and education facts. Spanish now matches the bare
 imperative verb, gated on detected language so the English noun "resume" never triggers
 it. The full matrix passes against the configured provider.
+
+## D-038: Answer every turn at HTTP 200, and name entities from one detector only
+
+**Status:** Accepted (closes the last classifier-failure raise left by D-020)
+
+Three rules, all reached through the same observed turn — a user wrote *"The part where
+it says he worked at google"* and received no assistant response at all.
+
+**A turn never ends in a raise.** `AgentService._respond` re-raised
+`GenerationUnavailableError` when the classifier failed twice and no local recovery
+matched, which `POST /api/chat` renders as HTTP 503 and the frontend as nothing. The
+classifier only ever chose a tool; it never chose facts. So an anchor evidenced in the
+message (`detect_resume_topic`) now drives `search_resume` directly, and a message with
+no evidenced anchor gets the same deterministic clarification any unresolvable turn gets.
+Failing closed means selecting nothing, not returning nothing.
+
+An unanchored question still clarifies rather than widening to `summary` facts, which is
+the substitution `detect_resume_topic` exists to prevent. `"What results has Marco
+produced?"` is the one release-adjacent phrasing in that position: it is answered
+normally, and clarifies only while the classifier is down.
+
+**A falsified antecedent is answered, not guessed at.** A phrase that asserts what was
+already said and carries its antecedent inline (`the part where it says …`, `cuando
+dijiste …`) is checked against the profile before anything else runs. Every answer this
+agent produces is assembled from profile facts, so an antecedent matching no fact was
+never delivered, and the honest answer says so. A bare referent (`that bit`) names
+nothing checkable and stays on the clarification path. Accumulated `delivered_fact_ids`
+(#12) will let this distinguish *never said* from *not in the profile* per conversation;
+until then the profile-wide check is the stronger claim available.
+
+**Query terms are not entities.** `ResumeSearchResult.unmatched_terms` holds raw query
+terms that matched no fact, and rendering it produced *"I couldn't find anything about
+**his** in Marco's profile"* and *"No encontré nada sobre **resume, marco.**"*. It is now
+a retrieval diagnostic only; `find_unknown_entities` is the sole source of a named entity
+in any answer. Pronouns, discourse verbs, and summarize verbs joined `_STOP_WORDS`, and
+`normalize_resume_text` trims edge dots so `marco.` and `marco` are one token — which
+also fixes the retrieval failure underneath the wording, since a stocked topic no longer
+looks empty because the question contained *his*.
+
+**Why:** every other boundary in this system degrades to a deterministic answer at
+HTTP 200; one path did not, and it was reachable from ordinary phrasing.
+
+**Consequence:** `_is_title_case` now measures capitalization after the opening word,
+which is capitalized by orthography in every sentence and made short questions look
+title-cased purely for being short. `Did Marco work at Google?` reached the 0.6 ratio and
+skipped entity detection entirely, while `Tell me about Marco's experience at Google.`
+did not — the same entity, two verdicts. Both now return the same not-found naming
+Google, and genuine title-case prose is still skipped.
