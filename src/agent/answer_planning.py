@@ -401,12 +401,12 @@ class AnswerPlanner:
             topic = fallback_topic
             scope = fallback_scope
             requested_field = fallback_field
-            if dimension == "impact" and topic == "summary":
+            if dimension == "impact":
                 # An unscoped impact question ("achievements", "logros") carries no
-                # topic token, but the outcome evidence it asks for is never in the
-                # summary topic, so the fallback selects nothing. Anchor on the topic
-                # that actually holds the canonical outcome facts. No fact is derived:
-                # the predicate is the same one the impact branch already filters on.
+                # topic token, so a classifier-selected tool must not choose its scope.
+                # Anchor on the topic that actually holds the canonical outcome facts.
+                # No fact is derived: the predicate is the same one the impact branch
+                # already filters on.
                 outcome_topics = Counter(
                     fact.topic
                     for fact in catalog

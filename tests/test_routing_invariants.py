@@ -64,6 +64,7 @@ FAMILIES = (
             "Marco's accomplishments",
             "Which achievements does Marco have?",
             "What did Marco accomplish in his work?",
+            "Tell me Marco's achievements",
         ),
         out_of_scope=(
             (
@@ -81,11 +82,13 @@ FAMILIES = (
         language="es",
         resolves=(
             "Cuales son los logros de Marco?",
+            "Que logros ha tenido marco?",
             "¿Qué logró Marco?",
             "Sus logros?",
             "¿Cuáles fueron sus logros?",
             "Logros de Marco",
             "¿Qué logró Marco en su trabajo?",
+            "¿Qué logros consiguió Marco?",
         ),
     ),
     ParaphraseFamily(
@@ -180,11 +183,25 @@ def strip_accents(text: str) -> str:
     return without_marks.replace("¿", "").replace("¡", "")
 
 
+CLASSIFIER_DECISIONS = (
+    IntentDecision(intent=Intent.SEARCH_QUERY, confidence=0.95),
+    IntentDecision(intent=Intent.SUMMARY_REQUEST, confidence=0.95, audience="recruiter"),
+    IntentDecision(
+        intent=Intent.DIRECT_QUESTION,
+        confidence=0.95,
+        profile_field="companies",
+    ),
+)
+
+
 class StubClassifier:
-    """A fixed broad search intent: routing must come from the planner, not the model."""
+    """Return one fixed decision so families can vary classifier output offline."""
+
+    def __init__(self, decision: IntentDecision = CLASSIFIER_DECISIONS[0]) -> None:
+        self._decision = decision
 
     def classify(self, message: str, history: list[object]) -> IntentDecision:
-        return IntentDecision(intent=Intent.SEARCH_QUERY, confidence=0.95)
+        return self._decision
 
 
 class EmptyFactSetIsAFailure:
@@ -220,14 +237,31 @@ def route(message: str) -> tuple[str | None, str, str]:
     return plan.synthesis_dimension, plan.topic, plan.language
 
 
-def answer(message: str) -> object:
+def answer(
+    message: str,
+    decision: IntentDecision = CLASSIFIER_DECISIONS[0],
+) -> object:
     """Run one full turn offline with a stubbed classifier and a strict generator."""
     service = AgentService(
         profile=load_profile("data/profile.json"),
-        classifier=StubClassifier(),
+        classifier=StubClassifier(decision),
         generator=EmptyFactSetIsAFailure(),
     )
     return service.respond(message, history=[])
+
+
+def routing_signature(response: object) -> tuple[str | None, str | None, tuple[str, ...]]:
+    """Return the evidence contract that classifier disagreement must not change."""
+    trace = response.trace
+    return trace.synthesis_dimension, trace.answer_topic, tuple(trace.selected_fact_ids)
+
+
+def assert_stable_routing(
+    signatures: list[tuple[str | None, str | None, tuple[str, ...]]],
+) -> None:
+    """Fail with every observed route when one semantic family diverges."""
+    assert signatures
+    assert all(signature == signatures[0] for signature in signatures), signatures
 
 
 FAMILY_VARIANTS = [
@@ -309,6 +343,24 @@ def test_equivalent_bilingual_families_resolve_alike(
         assert route(variant)[:2] == (spanish.dimension, spanish.topic)
 
 
+@pytest.mark.parametrize("family", FAMILIES, ids=lambda family: family.name)
+def test_classifier_disagreement_does_not_change_family_evidence(
+    family: ParaphraseFamily,
+) -> None:
+    """Current-message semantics must outrank incompatible classifier tool choices."""
+    signatures = [
+        routing_signature(answer(variant, decision))
+        for variant in family.resolves
+        for decision in CLASSIFIER_DECISIONS
+    ]
+
+    assert_stable_routing(signatures)
+    dimension, topic, selected_fact_ids = signatures[0]
+    assert dimension == family.dimension
+    assert topic == family.topic
+    assert selected_fact_ids
+
+
 @pytest.mark.parametrize("message", ALL_VARIANTS, ids=list(ALL_VARIANTS))
 def test_no_variant_invokes_the_generator_with_an_empty_fact_set(message: str) -> None:
     """The #6 invariant, asserted across every phrasing this group knows."""
@@ -346,6 +398,17 @@ def test_routing_assertions_discriminate_between_families() -> None:
     assert route("What are Marco's achievements?")[:2] == ("impact", "experience")
     assert route("Summarize Marco's experience.")[:2] == ("summary", "experience")
     assert route("What are Marco's achievements?") != route("Summarize Marco's experience.")
+
+
+def test_classifier_disagreement_detector_is_not_vacuous() -> None:
+    """The classifier invariant is evidence only if unequal fact selections fail it."""
+    with pytest.raises(AssertionError):
+        assert_stable_routing(
+            [
+                ("impact", "experience", ("fact:one",)),
+                ("impact", "experience", ("fact:two",)),
+            ]
+        )
 
 
 def test_language_assertions_discriminate_between_languages() -> None:
