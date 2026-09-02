@@ -1,7 +1,7 @@
 """Typed contracts crossing agent, tool, and verification boundaries."""
 
 from enum import Enum
-from typing import Annotated, Literal
+from typing import Annotated, Literal, get_args
 
 from pydantic import BaseModel, Field
 
@@ -217,15 +217,60 @@ class AgentTrace(BaseModel):
 
 StateValue = Annotated[str, Field(min_length=1, max_length=200)]
 
+DiscourseId = Annotated[
+    str,
+    Field(min_length=1, max_length=120, pattern=r"^[A-Za-z0-9][A-Za-z0-9:._+#-]*$"),
+]
+"""A fact or source identifier from the profile catalog, and nothing else.
+
+The pattern admits no whitespace, so no message or answer text can be stored in a
+discourse field whatever a client sends. That is what keeps the record derived
+metadata rather than a server-side transcript.
+"""
+
+MAX_DELIVERED_FACT_IDS = 64
+"""Bound on the accumulating delivered-fact record.
+
+The current profile derives 55 facts in total, so the record is lossless today. If
+the profile outgrows the cap the oldest deliveries are dropped, which degrades
+"already said" toward the recent past rather than failing.
+"""
+
+MAX_DISCUSSED_SOURCE_IDS = 32
+"""Bound on the accumulating covered-source record, on the same terms."""
+
+MAX_DISCUSSED_TOPICS = len(get_args(AnswerTopic))
+"""There are only so many topics; a conversation cannot cover more than all of them."""
+
 
 class ConversationState(BaseModel):
-    """Compact client-carried state containing verified referents only."""
+    """Compact client-carried state containing verified referents only.
+
+    Two layers with different lifetimes. The `last_*` fields are a single-turn
+    snapshot, overwritten every turn. The discourse record below accumulates, so the
+    conversation knows what it has already said and what it is currently about.
+    """
 
     last_topic: AnswerTopic | None = None
     last_source_ids: list[StateValue] = Field(default_factory=list, max_length=20)
     last_entities: list[StateValue] = Field(default_factory=list, max_length=8)
     last_tool: StateValue | None = None
     response_language: Literal["en", "es"] = "en"
+
+    focus_source_id: DiscourseId | None = None
+    """The one unit of information under discussion, or None when several are."""
+
+    delivered_fact_ids: list[DiscourseId] = Field(
+        default_factory=list, max_length=MAX_DELIVERED_FACT_IDS
+    )
+    """Every fact this conversation has already delivered, oldest first."""
+
+    discussed_topics: list[AnswerTopic] = Field(
+        default_factory=list, max_length=MAX_DISCUSSED_TOPICS
+    )
+    discussed_source_ids: list[DiscourseId] = Field(
+        default_factory=list, max_length=MAX_DISCUSSED_SOURCE_IDS
+    )
 
 
 class AgentResponse(BaseModel):

@@ -528,3 +528,52 @@ title-cased purely for being short. `Did Marco work at Google?` reached the 0.6 
 skipped entity detection entirely, while `Tell me about Marco's experience at Google.`
 did not — the same entity, two verdicts. Both now return the same not-found naming
 Google, and genuine title-case prose is still skipped.
+
+## D-039: Split conversation state into a single-turn snapshot and an accumulating record
+
+**Status:** Accepted (extends D-022)
+
+`ConversationState` was one layer, overwritten every turn, so the conversation had no
+memory of what it had already said. It now carries two layers with different lifetimes:
+
+- the existing `last_*` fields, still a single-turn snapshot, unchanged in meaning;
+- `focus_source_id`, `delivered_fact_ids`, `discussed_topics`, and
+  `discussed_source_ids`, which accumulate.
+
+**Merged at one exit point, derived from the trace.** The record is assembled in
+`AgentService.respond`, not inside the seven answer paths that build a snapshot. Every
+route already reports what it selected through `selected_fact_ids`, `selected_source_ids`,
+and `answer_topic`, so the record follows from the trace alone and a route added later
+cannot forget to maintain it.
+
+A turn that selects nothing keeps the record and resets the snapshot. Preserving a stale
+`last_entities` through a clarification would let the next "tell me more" resolve against
+a unit from two turns ago instead of asking; preserving the record is the point of having
+one. `focus_source_id` updates only on a turn that delivered facts, and only when those
+facts came from exactly one source root — several roots is an ambiguity, and carrying the
+older focus through would answer about the wrong thing.
+
+**Still no conversation text on the server.** The new identifier fields use a
+`DiscourseId` pattern that admits no whitespace, so message or answer text cannot be
+stored in them whatever a client sends: prose in a state payload is rejected at the API
+contract with HTTP 422. `discussed_topics` is typed as the `AnswerTopic` literal union
+and can hold nothing else. This is derived metadata, not a transcript, and the pattern is
+what makes that structural rather than a convention.
+
+**Client-carried state stays untrusted.** Identifiers arriving from the client are
+filtered against the live fact catalog before use, so a forged or stale record cannot
+claim a fact was delivered that the profile does not define. Caps live on the model
+(`MAX_DELIVERED_FACT_IDS = 64`, `MAX_DISCUSSED_SOURCE_IDS = 32`, and `MAX_DISCUSSED_TOPICS`
+derived from the topic union itself), and the single writer revalidates rather than
+copying, so a cap violation fails in the server rather than shipping to the client.
+
+**Why:** the negative-referent answer added in D-038 can only check the profile, so it
+cannot yet distinguish "I never said that" from "that is not in the profile" for content
+the profile does contain. Deepening a follow-up beyond one hop has the same missing
+foundation. Both need to know what the conversation has already delivered.
+
+**Consequence:** the current profile derives 55 facts in total, so the delivered record
+is lossless today; if the profile outgrows the cap, the oldest deliveries are dropped and
+"already said" degrades toward the recent past rather than failing. Worst-case state is
+roughly 17 KB, bounded entirely by the model's caps — `POST /api/chat` measures its
+size limits against the message and history only.

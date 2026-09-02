@@ -3,7 +3,7 @@
 import json
 import logging
 import re
-from typing import Literal, Protocol
+from typing import Literal, Protocol, get_args
 
 from src.agent.answer_planning import (
     AnswerPlanner,
@@ -13,8 +13,12 @@ from src.agent.answer_planning import (
     plan_trace_fields,
 )
 from src.agent.contracts import (
+    MAX_DELIVERED_FACT_IDS,
+    MAX_DISCUSSED_SOURCE_IDS,
+    MAX_DISCUSSED_TOPICS,
     AnswerMode,
     AnswerPlan,
+    AnswerTopic,
     AgentResponse,
     AgentTrace,
     ClaimKind,
@@ -63,6 +67,15 @@ from src.tools.profile_tools import (
     search_resume,
     summarize_profile,
 )
+
+_ANSWER_TOPICS = frozenset(get_args(AnswerTopic))
+"""The topics a trace may name; anything else is not a topic this state can record."""
+
+
+def _bounded(values: list[str], limit: int) -> list[str]:
+    """Deduplicate oldest-first and keep the most recent entries within the cap."""
+    return list(dict.fromkeys(values))[-limit:]
+
 
 _REFERENT_PHRASES = (
     "the part where it says", "the part where you said", "the part that says",
@@ -252,7 +265,93 @@ class AgentService:
             response.trace.selection_path = (
                 "primary" if response.trace.selected_fact_ids else "none"
             )
+        response.state = self._accumulate_discourse(
+            previous=state,
+            current=response.state,
+            trace=response.trace,
+        )
         return response
+
+    def _accumulate_discourse(
+        self,
+        *,
+        previous: ConversationState | None,
+        current: ConversationState | None,
+        trace: AgentTrace,
+    ) -> ConversationState | None:
+        """Carry the discourse record forward across turns, derived from this turn's trace.
+
+        Merging here rather than inside each answer path is deliberate. Every route
+        already reports what it selected, so the record follows from the trace alone,
+        and a route added later cannot forget to maintain it.
+
+        The two layers keep their own lifetimes: `current` supplies the single-turn
+        snapshot exactly as before, and a turn that produced no snapshot resets those
+        fields rather than leaving a stale referent behind for the next `tell me more`.
+        """
+        catalog = build_resume_fact_catalog(self._profile)
+        known_facts = {fact.fact_id for fact in catalog}
+        known_sources = {fact.source_id for fact in catalog}
+        turn_facts = [
+            fact_id for fact_id in trace.selected_fact_ids if fact_id in known_facts
+        ]
+        turn_sources = [
+            source_id
+            for source_id in trace.selected_source_ids
+            if source_id in known_sources
+        ]
+        if previous is None and current is None and not turn_facts and not turn_sources:
+            return None
+
+        base = current if current is not None else ConversationState(
+            response_language=previous.response_language if previous else "en",
+        )
+        # Client-carried state is untrusted input. Keep only identifiers the catalog
+        # still defines, so a forged or stale record cannot claim a fact was delivered.
+        delivered = [
+            fact_id
+            for fact_id in (previous.delivered_fact_ids if previous else [])
+            if fact_id in known_facts
+        ]
+        discussed_sources = [
+            source_id
+            for source_id in (previous.discussed_source_ids if previous else [])
+            if source_id in known_sources
+        ]
+        discussed_topics = list(previous.discussed_topics) if previous else []
+        focus = previous.focus_source_id if previous else None
+        if focus is not None and focus not in known_sources:
+            focus = None
+
+        if turn_facts or turn_sources:
+            delivered = _bounded(delivered + turn_facts, MAX_DELIVERED_FACT_IDS)
+            discussed_sources = _bounded(
+                discussed_sources + turn_sources, MAX_DISCUSSED_SOURCE_IDS
+            )
+            if trace.answer_topic in _ANSWER_TOPICS:
+                discussed_topics = _bounded(
+                    [*discussed_topics, trace.answer_topic], MAX_DISCUSSED_TOPICS
+                )
+            roots = list(
+                dict.fromkeys(
+                    source_id.split(".highlight:", 1)[0] for source_id in turn_sources
+                )
+            )
+            # One unit answered from is a referent; several is an ambiguity, and
+            # carrying the older focus through would answer about the wrong thing.
+            focus = roots[0] if len(roots) == 1 else None
+
+        # Revalidated rather than copied: the caps are the model's promise, and this
+        # is the one writer, so a cap violation must fail here rather than ship.
+        return ConversationState.model_validate(
+            {
+                **base.model_dump(),
+                "focus_source_id": focus,
+                "delivered_fact_ids": delivered,
+                "discussed_topics": discussed_topics,
+                "discussed_source_ids": discussed_sources,
+            }
+        )
 
     def _respond(
         self,
