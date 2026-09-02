@@ -281,6 +281,18 @@ class AgentService:
     ) -> AgentResponse:
         """Answer one turn and record which selection path produced the answer."""
         response = self._respond(message, history=history, state=state)
+        if (
+            response.trace.referent_source is None
+            and response.trace.guardrail_input != "blocked"
+            and response.trace.tool_name == "search_resume"
+            and (
+                bool(response.trace.selected_fact_ids)
+                or response.trace.rendering_mode == "follow_up_exhausted"
+            )
+            and self._is_progressive_follow_up(message)
+            and self._explicit_follow_up_unit(message) is not None
+        ):
+            response.trace.referent_source = "message"
         self._apply_informativeness_floor(response, message)
         if response.trace.selection_path is None and response.trace.guardrail_input != "blocked":
             # Recovery marks itself; everything else that reached fact selection is
@@ -479,31 +491,25 @@ class AgentService:
             )
 
         explicit_plan = self._answer_planner.explicit_direct_plan(message)
+        follow_up = self._follow_up_plan(message, state, history)
+        explicitly_named_unit = (
+            self._explicit_follow_up_unit(message)
+            if isinstance(follow_up, SearchResumeArguments)
+            else None
+        )
+        if explicit_plan is not None and explicitly_named_unit is None:
+            # A direct topic in the current message still outranks conversation
+            # history. A named unit takes the progressive route so it can deepen.
+            follow_up = None
+        elif isinstance(follow_up, SearchResumeArguments):
+            explicit_plan = None
         referent_source: Literal["message", "state"] | None = (
             "message" if explicit_plan is not None else None
         )
-        if explicit_plan is None:
+        if explicit_plan is None and follow_up is None:
             state_plan = self._answer_planner.explicit_direct_plan(message, state)
             if state_plan is not None:
                 explicit_plan, referent_source = state_plan, "state"
-        follow_up = None if explicit_plan is not None else self._follow_up_plan(message, state, history)
-        if follow_up == "clarify":
-            language = detect_response_language(message)
-            boundary_plan = self._answer_planner.boundary_plan(message, state)
-            answer = (
-                "¿A qué parte o elemento anterior te refieres?"
-                if language == "es"
-                else "Which part or item from the previous answer do you mean?"
-            )
-            return AgentResponse(
-                answer=answer,
-                trace=AgentTrace(
-                    grounding_status="clarification",
-                    **plan_trace_fields(boundary_plan, "clarification"),
-                ),
-                state=state,
-            )
-
         normalized_message = " ".join(message.casefold().split())
         if any(marker in normalized_message for marker in _RANKING_MARKERS):
             language = detect_response_language(message)
@@ -544,6 +550,30 @@ class AgentService:
                         return self._unclassified_response(message, state, fallback_reason)
                     follow_up = SearchResumeArguments(query=message, topic=topic)
                 decision = IntentDecision(intent=Intent.FOLLOW_UP, confidence=1.0)
+        if follow_up == "clarify":
+            language = detect_response_language(message)
+            boundary_plan = self._answer_planner.boundary_plan(message, state)
+            answer = (
+                "¿A qué parte o elemento anterior te refieres?"
+                if language == "es"
+                else "Which part or item from the previous answer do you mean?"
+            )
+            return AgentResponse(
+                answer=answer,
+                trace=AgentTrace(
+                    intent=decision.intent.value,
+                    intent_confidence=decision.confidence,
+                    grounding_status="clarification",
+                    fallback_reason=fallback_reason,
+                    **plan_trace_fields(boundary_plan, "clarification"),
+                ),
+                state=state,
+            )
+        if isinstance(follow_up, SearchResumeArguments):
+            # A verified focused plan is stronger evidence than the classifier's
+            # coarse intent. Normalize the trace decision before any classifier-
+            # dependent boundary can divert the turn.
+            decision = IntentDecision(intent=Intent.FOLLOW_UP, confidence=1.0)
         if explicit_plan is not None:
             explicit_response = self._direct_plan_response(
                 plan=explicit_plan,
@@ -602,6 +632,23 @@ class AgentService:
             message,
             tool_result,
         )
+        if (
+            isinstance(follow_up, SearchResumeArguments)
+            and follow_up.source_ids
+            and follow_up.limit == 1
+            and isinstance(tool_result, ResumeSearchResult)
+        ):
+            # Generic deepening is selection, not transformation. Some of its phrase
+            # family predates this route as a broad "conclusion" marker, so pin the
+            # plan back to the one fact the focused search actually selected.
+            answer_plan = answer_plan.model_copy(
+                update={
+                    "mode": AnswerMode.DIRECT,
+                    "synthesis_dimension": None,
+                    "selected_fact_ids": [fact.fact_id for fact in tool_result.matches],
+                    "selected_source_ids": [fact.source_id for fact in tool_result.matches],
+                }
+            )
         if isinstance(tool_result, ProfileQueryResult):
             tool_result_count = len(tool_result.value)
         elif isinstance(tool_result, ProfileSummaryPlan):
@@ -609,6 +656,18 @@ class AgentService:
         else:
             tool_result_count = len(getattr(tool_result, "matches", [])) if tool_result else 0
         if isinstance(tool_result, ResumeSearchResult) and tool_result.profile_missing:
+            if (
+                isinstance(follow_up, SearchResumeArguments)
+                and follow_up.source_ids
+                and follow_up.exclude_fact_ids
+                and self._focused_unit_is_exhausted(follow_up)
+            ):
+                return self._follow_up_exhausted_response(
+                    decision=decision,
+                    arguments=follow_up,
+                    answer_plan=answer_plan,
+                    state=state,
+                )
             return self._profile_missing_response(
                 decision, tool_result, tool_name, answer_plan
             )
@@ -1888,6 +1947,48 @@ class AgentService:
             ),
         )
 
+    def _follow_up_exhausted_response(
+        self,
+        *,
+        decision: IntentDecision,
+        arguments: SearchResumeArguments,
+        answer_plan: AnswerPlan,
+        state: ConversationState | None,
+    ) -> AgentResponse:
+        """Name the focused unit when all of its canonical facts were delivered."""
+        catalog = build_resume_fact_catalog(self._profile)
+        focused_facts = [
+            fact
+            for fact in catalog
+            if any(
+                self._sources_related(fact.source_id, source_id)
+                for source_id in arguments.source_ids
+            )
+        ]
+        entity = next((fact.entity for fact in focused_facts if fact.entity), None)
+        unit_name = entity or arguments.source_ids[0]
+        language = arguments.response_language or detect_response_language(arguments.query)
+        answer = (
+            f"Ya compartí toda la información disponible sobre {unit_name} en el perfil de Marco."
+            if language == "es"
+            else f"I've shared all the information available about {unit_name} in Marco's profile."
+        )
+        return AgentResponse(
+            answer=answer,
+            trace=AgentTrace(
+                intent=decision.intent.value,
+                intent_confidence=decision.confidence,
+                tool_name="search_resume",
+                grounding_status="exhausted",
+                answer_mode=AnswerMode.DIRECT.value,
+                rendering_mode="follow_up_exhausted",
+                answer_topic=answer_plan.topic,
+                answer_scope=answer_plan.scope,
+                requested_field=answer_plan.requested_field,
+            ),
+            state=ConversationState(response_language=language),
+        )
+
     def _state_from_result(
         self,
         tool_name: str | None,
@@ -1981,13 +2082,13 @@ class AgentService:
         state: ConversationState | None,
         history: list[object] | None = None,
     ) -> SearchResumeArguments | Literal["clarify"] | None:
-        normalized = " ".join(message.casefold().split())
+        normalized = normalize_resume_text(message)
         is_work_pivot = "en tu trabajo" in normalized or "at work" in normalized
-        is_follow_up = any(
+        is_progressive = self._is_progressive_follow_up(message)
+        is_follow_up = is_progressive or any(
             phrase in normalized
             for phrase in (
-                "con qué lo construiste", "con que lo construiste", "tell me more about that one",
-                "what else", "qué más", "que mas", "y en tu trabajo", "and at work",
+                "con que lo construiste", "y en tu trabajo", "and at work",
                 "for that", "on that", "that one", "in that",
                 "con eso", "en ese", "para eso", "de eso",
             )
@@ -1996,6 +2097,33 @@ class AgentService:
             return None
         if is_work_pivot:
             return SearchResumeArguments(query=message, topic="experience")
+        if is_progressive:
+            explicit = self._explicit_follow_up_unit(message)
+            if explicit is not None:
+                entity, topic, source_id = explicit
+                return SearchResumeArguments(
+                    query=entity,
+                    topic=topic,
+                    source_ids=[source_id],
+                    exclude_fact_ids=state.delivered_fact_ids if state else [],
+                    response_language=detect_response_language(message),
+                    limit=1,
+                )
+            focused = self._focused_follow_up_unit(state)
+            if focused is None:
+                history_plan = self._history_entity_plan(message, history or [])
+                if history_plan is not None:
+                    return history_plan
+                return "clarify"
+            entity, topic, source_id = focused
+            return SearchResumeArguments(
+                query=entity,
+                topic=topic,
+                source_ids=[source_id],
+                exclude_fact_ids=state.delivered_fact_ids if state else [],
+                response_language=detect_response_language(message),
+                limit=1,
+            )
         if (
             state is None
             or not state.last_topic
@@ -2011,25 +2139,70 @@ class AgentService:
         )
         if len(source_roots) != 1:
             return "clarify"
-        if "what else" in normalized or "qué más" in normalized or "que mas" in normalized:
-            return SearchResumeArguments(
-                query=state.last_entities[0],
-                topic=state.last_topic,
-                source_ids=source_roots,
-                exclude_source_ids=state.last_source_ids,
-            )
-        if "tell me more" in normalized:
-            return SearchResumeArguments(
-                query=state.last_entities[0],
-                topic=state.last_topic,
-                source_ids=source_roots,
-                exclude_source_ids=state.last_source_ids,
-            )
         return SearchResumeArguments(
             query=state.last_entities[0],
             topic=state.last_topic,
             source_ids=source_roots,
         )
+
+    @staticmethod
+    def _is_progressive_follow_up(message: str) -> bool:
+        normalized = normalize_resume_text(message)
+        return any(
+            phrase in normalized
+            for phrase in (
+                "tell me more", "more about", "what else", "que mas",
+                "cuentame mas", "platicame mas", "dime mas",
+            )
+        )
+
+    def _explicit_follow_up_unit(
+        self,
+        message: str,
+    ) -> tuple[str, ResumeTopic, str] | None:
+        """Resolve one unit named in this message, independently of conversation focus."""
+        normalized = f" {normalize_resume_text(message)} "
+        matches: dict[str, tuple[str, ResumeTopic, str]] = {}
+        for fact in build_resume_fact_catalog(self._profile):
+            if not fact.entity:
+                continue
+            entity = normalize_resume_text(fact.entity)
+            if not entity or f" {entity} " not in normalized:
+                continue
+            source_id = fact.source_id.split(".highlight:", 1)[0]
+            matches[source_id] = (fact.entity, fact.topic, source_id)
+        return next(iter(matches.values())) if len(matches) == 1 else None
+
+    def _focused_unit_is_exhausted(self, arguments: SearchResumeArguments) -> bool:
+        """Decide exhaustion from catalog membership, never lexical search residue."""
+        unit_fact_ids = {
+            fact.fact_id
+            for fact in build_resume_fact_catalog(self._profile)
+            if fact.topic == arguments.topic
+            and any(
+                self._sources_related(fact.source_id, source_id)
+                for source_id in arguments.source_ids
+            )
+        }
+        return bool(unit_fact_ids) and unit_fact_ids <= set(arguments.exclude_fact_ids)
+
+    def _focused_follow_up_unit(
+        self,
+        state: ConversationState | None,
+    ) -> tuple[str, ResumeTopic, str] | None:
+        """Resolve the accumulated focus even when the last-turn snapshot is empty."""
+        if state is None or state.focus_source_id is None:
+            return None
+        focused = [
+            fact
+            for fact in build_resume_fact_catalog(self._profile)
+            if self._sources_related(fact.source_id, state.focus_source_id)
+        ]
+        entities = list(dict.fromkeys(fact.entity for fact in focused if fact.entity))
+        topics = list(dict.fromkeys(fact.topic for fact in focused))
+        if len(entities) != 1 or len(topics) != 1:
+            return None
+        return entities[0], topics[0], state.focus_source_id
 
     _HISTORY_TECHNOLOGY_MARKERS = (
         "technolog", "tecnolog", "stack", "built with", "con que",

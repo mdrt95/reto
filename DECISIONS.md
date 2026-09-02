@@ -680,3 +680,42 @@ single final gate covers every current and future rendering path while preservin
 heuristic: contextual employment-field sentences, labeled one-item lists, and concise
 reviewed narratives remain deliverable. Selection cardinality is irrelevant because a
 synthesis path can select several facts and still reduce its output to one bare term.
+
+## D-043: Deepen by fact inside the accumulated conversation focus
+
+**Status:** Accepted (builds on D-039 and preserves D-032 precedence)
+
+Generic English and Spanish deepening phrases resolve against the accumulated
+`focus_source_id`, not the disposable `last_*` snapshot. The focused source root bounds
+the search to one project, employer, or other profile unit; `delivered_fact_ids` excludes
+individual facts already shown, and a one-fact limit makes each successive turn advance
+without emptying the whole unit at once. `SearchResumeArguments.exclude_fact_ids` keeps
+fact exclusion in the deterministic retrieval boundary rather than post-filtering a tool
+result in the orchestrator. The resolved unit entity, not the full conversational
+utterance, is the retrieval query; incidental words such as "details" or "architecture"
+therefore cannot manufacture an empty result. The original request language travels as
+separate typed metadata.
+
+A unit explicitly named in the current message is resolved before conversation focus, so
+"Tell me more about Sybil" cannot deepen a previously focused employer. When every fact
+under the selected source root has already been delivered, the response names that unit
+and states in the request language that its available profile information is exhausted.
+The exhaustion turn selects no facts, clears the disposable `last_*` snapshot, and
+preserves the accumulated record and focus. Focused progressive plans also normalize the
+trace intent to `follow_up` before low-confidence or out-of-scope classifier boundaries;
+the verified source root, not a coarse classifier guess, owns that turn. The fresh empty
+snapshot carries the current request language, and explicit-message provenance is written
+only after the progressive search selected facts or legitimately reached exhaustion —
+input text rejected by a guardrail establishes no referent. Legitimate exhaustion is a
+catalog-set comparison: every fact under the focused source root must already occur in
+`delivered_fact_ids`; an empty lexical search result alone can never prove exhaustion.
+
+**Why:** source-level exclusion treated one delivered fact as if the whole unit had been
+covered, while relying on `last_source_ids` made multi-turn deepening disappear as soon as
+an intervening snapshot carried no referent. The discourse record introduced in D-039 is
+the authoritative foundation for both continuity and non-repetition.
+
+**Consequence:** generic deepening is deterministic selection, not a synthesis request,
+even though some phrases also remain broad conclusion markers for standalone questions.
+The orchestrator pins these focused searches to the single fact returned by the tool;
+explicit transformations still use the ordinary synthesis path outside this route.
