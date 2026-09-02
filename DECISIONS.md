@@ -617,3 +617,38 @@ answer is to say the premise is wrong and then answer the question underneath it
 drops the record makes every asserted antecedent look undelivered, so the agent adds a
 correction it cannot support. The failure is one unnecessary sentence in front of a
 correct answer, which is why the correction is a prefix rather than a refusal.
+
+## D-041: Anchor every impact question to the outcome topic, and vary the classifier offline
+
+**Status:** Accepted (extends D-032 and the verification policy in `specs/03`)
+
+Two phrasings of one question returned different evidence minutes apart: *"Que logros ha
+tenido marco?"* selected one outcome, *"Cuales son los logros de Marco?"* selected two.
+Neither reached `MAX_SYNTHESIS_PROPOSITIONS`, so the budget was not the binding
+constraint — selection was.
+
+The impact branch anchored to the topic holding the canonical outcome facts only when the
+fallback topic came out as `summary`. Any other fallback topic kept whatever scope the
+classifier's tool choice implied, so the same question answered differently depending on
+which tool the model happened to pick. The anchor now applies to every impact question:
+the dimension decides the topic, because the dimension is read from the current message
+and the tool choice is not.
+
+**The offline layer can now disagree with itself.** The paraphrase families ran against
+one fixed stub decision (`SEARCH_QUERY` at 0.95), which is what keeps them provider-free
+and sub-second — and also what made this class of bug invisible, since the divergence was
+classifier-driven and the layer had only one classifier. Families now run against three
+deliberately incompatible decisions, and assert that the dimension, topic, and selected
+fact IDs are identical across all of them. `specs/03` already called for incompatible
+classifier doubles; this is where they belong.
+
+**Why:** a fixed matrix cannot prove robustness against the dimension real users vary,
+and a single stub classifier cannot prove robustness against the component that actually
+diverged. Adding the missing paraphrase alone would have passed while the live behavior
+stayed broken.
+
+**Consequence:** reverting the routing fix now fails four family assertions, while every
+pre-existing test in that file still passes — which is the measure of what the layer
+could not previously see. The group runs 222 cases in about one second, still with no
+provider in the path, and carries a negative control proving the new detector fires on
+unequal fact selections.
