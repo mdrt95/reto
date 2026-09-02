@@ -7,6 +7,9 @@ from src.agent.contracts import (
     AnswerMode,
     AnswerPlan,
     ConversationState,
+    MAX_SYNTHESIS_FACTS,
+    MAX_SYNTHESIS_SENTENCES,
+    MAX_SYNTHESIS_WORDS,
     SynthesisDimension,
 )
 from src.models.profile import Profile
@@ -458,10 +461,12 @@ class AnswerPlanner:
         )
 
         detail_requested = self.detail_requested(message)
+        # Beyond this bound the 3-sentence/75-word delivery budget is unreachable, so
+        # the extra evidence could only ever be discarded by a length rejection.
         selection_limit = (
             2
             if dimension in {"significance", "conclusion"} and not detail_requested
-            else 4
+            else MAX_SYNTHESIS_FACTS
         )
         bounded: list[ResumeFact] = []
         for fact in candidates:
@@ -757,8 +762,8 @@ class DirectAnswerRenderer:
 class SynthesisFallbackRenderer:
     """Render a concise canonical subset when transformation cannot be delivered."""
 
-    MAX_SENTENCES = 3
-    MAX_WORDS = 75
+    MAX_SENTENCES = MAX_SYNTHESIS_SENTENCES
+    MAX_WORDS = MAX_SYNTHESIS_WORDS
 
     def __init__(self, profile: Profile) -> None:
         self._catalog = {

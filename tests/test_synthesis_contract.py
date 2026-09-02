@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 
 import pytest
+from pydantic import ValidationError
 
 from src.agent.answer_planning import AnswerPlanner
 from src.agent.contracts import (
@@ -12,6 +13,8 @@ from src.agent.contracts import (
     GenerationUnavailableError,
     Intent,
     IntentDecision,
+    MAX_SYNTHESIS_FACTS,
+    MAX_SYNTHESIS_PROPOSITIONS,
     SynthesisProposition,
     SynthesisTransformation,
 )
@@ -124,7 +127,6 @@ class RecordingTransformation:
     ) -> SynthesisTransformation:
         self.calls.append({"message": message, "facts": facts, "language": language})
         return SynthesisTransformation(
-            text=self._candidate,
             propositions=[
                 SynthesisProposition(
                     text=self._candidate,
@@ -164,7 +166,7 @@ def test_synthesis_contract_selects_bounded_evidence_and_compresses_it(
     assert call["language"] == case.language
     selected_facts = call["facts"]
     assert isinstance(selected_facts, list)
-    assert 1 < len(selected_facts) <= 4
+    assert 1 < len(selected_facts) <= 3
     assert [fact.fact_id for fact in selected_facts] == response.trace.selected_fact_ids
     assert list(dict.fromkeys(fact.source_id for fact in selected_facts)) == (
         response.trace.selected_source_ids
@@ -235,7 +237,6 @@ def test_synthesis_outage_or_rejection_returns_one_concise_canonical_boundary(
                 raise GenerationUnavailableError("provider unavailable")
             assert candidate is not None
             return SynthesisTransformation(
-                text=candidate,
                 propositions=[
                     SynthesisProposition(
                         text=candidate,
@@ -330,7 +331,6 @@ def test_adversarial_synthesis_never_crosses_the_public_boundary(
             facts = kwargs["facts"]
             assert isinstance(facts, list)
             return SynthesisTransformation(
-                text=candidate,
                 propositions=[
                     SynthesisProposition(
                         text=candidate,
@@ -412,61 +412,48 @@ def test_general_synthesis_verifies_each_claim_against_its_own_citations() -> No
     assert response.trace.transformation_outcome.startswith("rejected:")
 
 
-@pytest.mark.parametrize(
-    ("message", "propositions", "expected_code"),
-    [
-        (
-            "Summarize Marco's experience.",
-            (
-                (
-                    "Marco works as a Jr. .NET Developer at Global Payments.",
-                    "fact:experience:exp-global-payments",
+def test_the_contract_cannot_express_one_proposition_per_selected_fact() -> None:
+    """A full selection has more facts than propositions, so a dump has no valid shape."""
+    with pytest.raises(ValidationError):
+        SynthesisTransformation(
+            propositions=[
+                SynthesisProposition(
+                    text="Marco works as a Jr. .NET Developer at Global Payments.",
+                    fact_ids=["fact:experience:exp-global-payments"],
                 ),
-                (
-                    "Marco implemented Redis and SQL caching.",
-                    "fact:experience:exp-global-payments.highlight:hl-performance",
+                SynthesisProposition(
+                    text="Marco implemented Redis and SQL caching.",
+                    fact_ids=["fact:experience:exp-global-payments.highlight:hl-performance"],
                 ),
-                (
-                    "Marco collaborated in delivering an ISV module.",
-                    "fact:experience:exp-global-payments.highlight:hl-isv-module",
+                SynthesisProposition(
+                    text="Marco collaborated in delivering an ISV module.",
+                    fact_ids=["fact:experience:exp-global-payments.highlight:hl-isv-module"],
                 ),
-            ),
-            "fact_dump",
-        ),
-        (
-            "What conclusion can you draw about Marco's experience?",
-            (
-                (
-                    "Marco works as a Jr. .NET Developer at Global Payments.",
-                    "fact:experience:exp-global-payments",
-                ),
-                (
-                    "Marco implemented Redis and SQL caching.",
-                    "fact:experience:exp-global-payments.highlight:hl-performance",
-                ),
-                (
-                    "Marco resolved availability-affecting performance bottlenecks.",
-                    "fact:experience:exp-global-payments.highlight:hl-performance",
-                ),
-            ),
-            "too_many_examples",
-        ),
-    ],
-)
-def test_synthesis_rejects_uncompressed_structures(
-    message: str,
-    propositions: tuple[tuple[str, str], ...],
-    expected_code: str,
-) -> None:
+            ]
+        )
+
+
+def test_a_concise_conclusion_rejects_more_than_one_supporting_example() -> None:
+    """Two propositions still overrun when one of them carries a second example."""
+
     class UncompressedTransformation:
         def rephrase(self, **_: object) -> SynthesisTransformation:
-            typed = [
-                SynthesisProposition(text=text, fact_ids=[fact_id])
-                for text, fact_id in propositions
-            ]
             return SynthesisTransformation(
-                text=" ".join(proposition.text for proposition in typed),
-                propositions=typed,
+                propositions=[
+                    SynthesisProposition(
+                        text="Marco works as a Jr. .NET Developer at Global Payments.",
+                        fact_ids=["fact:experience:exp-global-payments"],
+                    ),
+                    SynthesisProposition(
+                        text=(
+                            "Marco implemented Redis and SQL caching. Marco resolved "
+                            "availability-affecting performance bottlenecks."
+                        ),
+                        fact_ids=[
+                            "fact:experience:exp-global-payments.highlight:hl-performance"
+                        ],
+                    ),
+                ]
             )
 
     response = AgentService(
@@ -474,10 +461,10 @@ def test_synthesis_rejects_uncompressed_structures(
         classifier=SynthesisClassifier(),
         generator=GeneratorMustNotRun(),
         rephraser=UncompressedTransformation(),
-    ).respond(message, history=[])
+    ).respond("What conclusion can you draw about Marco's experience?", history=[])
 
     assert response.trace.rendering_mode == "canonical_fallback"
-    assert response.trace.transformation_outcome == f"rejected:{expected_code}"
+    assert response.trace.transformation_outcome == "rejected:too_many_examples"
 
 
 @pytest.mark.parametrize(
@@ -578,3 +565,77 @@ def test_bilingual_comparison_selects_equivalent_project_scope() -> None:
     assert english.topic == spanish.topic == "projects"
     assert english.selected_fact_ids == spanish.selected_fact_ids
     assert english.selected_source_ids == spanish.selected_source_ids
+
+
+class MultiPropositionTransformation:
+    """Return the aggregated shape a real provider emits: several mapped propositions."""
+
+    def __init__(self, propositions: tuple[str, ...]) -> None:
+        self._propositions = propositions
+        self.facts: list[ResumeFact] = []
+
+    def rephrase(
+        self,
+        *,
+        message: str,
+        facts: list[ResumeFact],
+        language: str,
+    ) -> SynthesisTransformation:
+        self.facts = facts
+        return SynthesisTransformation(
+            propositions=[
+                SynthesisProposition(text=text, fact_ids=[fact.fact_id])
+                for text, fact in zip(self._propositions, facts, strict=False)
+            ]
+        )
+
+
+def test_synthesis_accepts_propositions_without_a_duplicated_top_level_text() -> None:
+    """A provider states the answer once; a second copy can only drift and be rejected."""
+    profile = load_profile("data/profile.json")
+    planner = AnswerPlanner(profile)
+    plan = planner.plan_from_tool(
+        "Summarize Marco's experience.",
+        summarize_profile(profile, SummarizeProfileArguments(audience="recruiter")),
+    )
+    propositions = (
+        "Marco works as a Jr. .NET Developer at Global Payments.",
+        "He implemented caching, resolving availability bottlenecks.",
+    )
+    transformer = MultiPropositionTransformation(propositions)
+    service = AgentService(
+        profile=profile,
+        classifier=SynthesisClassifier(),
+        generator=GeneratorMustNotRun(),
+        rephraser=transformer,
+    )
+
+    response = service.respond("Summarize Marco's experience.", history=[])
+
+    assert response.trace.transformation_outcome == "accepted"
+    assert response.trace.rendering_mode == "transformed"
+    assert response.answer == " ".join(propositions)
+    assert [fact.fact_id for fact in transformer.facts] == plan.selected_fact_ids
+
+
+def test_a_full_selection_cannot_be_delivered_as_one_proposition_per_fact() -> None:
+    """Aggregation is structural: fewer propositions than facts leaves no 1:1 mapping."""
+    assert MAX_SYNTHESIS_PROPOSITIONS < MAX_SYNTHESIS_FACTS
+
+    profile = load_profile("data/profile.json")
+    planner = AnswerPlanner(profile)
+    schema_maximum = SynthesisTransformation.model_fields["propositions"].metadata[-1].max_length
+    assert schema_maximum == MAX_SYNTHESIS_PROPOSITIONS
+
+    for message in (
+        "Summarize Marco's experience.",
+        "Resume la experiencia de Marco.",
+        "Summarize the projects Marco has worked on.",
+        "What impact did Marco's work have?",
+        "¿Qué impacto tuvo el trabajo de Marco?",
+    ):
+        plan = planner.plan_from_tool(
+            message,
+            summarize_profile(profile, SummarizeProfileArguments(audience="recruiter")),
+        )
+        assert len(plan.selected_fact_ids) <= MAX_SYNTHESIS_FACTS, message

@@ -11,7 +11,11 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from src.agent.contracts import SynthesisDimension
+from src.agent.contracts import (
+    MAX_SYNTHESIS_SENTENCES,
+    MAX_SYNTHESIS_WORDS,
+    SynthesisDimension,
+)
 from src.tools.profile_tools import fact_display_text, ResumeFact, normalize_resume_text
 
 _ESCALATION_TOKENS = {
@@ -208,7 +212,6 @@ def verify_rephrase(
         allowed_forms = _VERB_MAP.get(first_token)
         if allowed_forms is None:
             continue
-        source_verb_categories.add(first_token)
         if require_each_fact_verb and not (normalized_token_set & allowed_forms):
             return RephraseVerdict(
                 allowed=False,
@@ -216,6 +219,14 @@ def verify_rephrase(
                 details=[f"Missing an allowed verb form for '{first_token}'"],
             )
 
+    # A fact authorizes every verb meaning its own canonical wording uses, not just its
+    # leading verb: "Collaborated in delivering ... Built an internal workflow" authorizes
+    # "built". Escalation beyond the selection stays blocked by the escalation check above.
+    source_verb_categories = {
+        category
+        for category, forms in _VERB_MAP.items()
+        if selected_vocabulary & forms
+    }
     used_verb_categories = {
         category
         for category, forms in _VERB_MAP.items()
@@ -269,6 +280,10 @@ _FUNCTION_TOKENS = {
     "como", "en", "de", "del", "al", "por", "para", "con", "sin", "que", "quien",
     "su", "sus", "este", "esta", "estos", "estas", "lo", "se", "ha", "han", "fue",
     "es", "son", "siendo", "mediante", "desde", "hasta", "sobre",
+    "s", "per", "each", "both", "such", "than", "then", "not", "no", "more", "most",
+    "other", "another", "after", "before", "during", "within", "where", "when",
+    "cada", "ambos", "tanto", "ademas", "antes", "despues", "durante", "dentro",
+    "donde", "cuando", "mas", "otro", "otra", "otros", "otras",
 }
 
 
@@ -301,6 +316,31 @@ def _authorized_verb_forms(facts: list[ResumeFact]) -> set[str]:
     return forms
 
 
+# Compression rewrites grammar, not evidence: "implemented" becomes "implementing",
+# "merged" becomes "merging". Comparing raw tokens treats every inflection as a new
+# fact. Stem candidates are deliberately conservative (a minimum four-character stem,
+# suffix stripping only), and they guard nothing on their own — leaked entities,
+# numbers, escalation vocabulary, verb drift, and invented outcomes each have their
+# own check above that this comparison does not touch.
+_INFLECTION_SUFFIXES = (
+    "ings", "ing", "edly", "ed", "es", "s",
+    "andose", "iendose", "ando", "iendo", "ciones", "cion",
+    "ados", "adas", "idos", "idas", "ado", "ada", "ido", "ida",
+    "amos", "emos", "imos", "aron", "ieron", "aban", "abas", "aba", "eron",
+    "ar", "er", "ir", "io", "os", "as", "o", "a",
+)
+_MINIMUM_STEM_LENGTH = 4
+
+
+def _word_stems(token: str) -> set[str]:
+    """Return one token's conservative stem candidates, including the token itself."""
+    stems = {token}
+    for suffix in _INFLECTION_SUFFIXES:
+        if token.endswith(suffix) and len(token) - len(suffix) >= _MINIMUM_STEM_LENGTH:
+            stems.add(token[: -len(suffix)])
+    return stems
+
+
 def verify_synthesis_text(
     *,
     text: str,
@@ -322,11 +362,14 @@ def verify_synthesis_text(
 
     sentence_count = count_sentences(text)
     word_count = len(text.split())
-    if sentence_count > 3 or word_count > 75:
+    if sentence_count > MAX_SYNTHESIS_SENTENCES or word_count > MAX_SYNTHESIS_WORDS:
         return RephraseVerdict(
             allowed=False,
             code="too_long",
-            details=[f"{sentence_count} sentences / {word_count} words; maximum is 3 / 75"],
+            details=[
+                f"{sentence_count} sentences / {word_count} words; maximum is "
+                f"{MAX_SYNTHESIS_SENTENCES} / {MAX_SYNTHESIS_WORDS}"
+            ],
         )
 
     selected_tokens = {
@@ -344,7 +387,14 @@ def verify_synthesis_text(
         | _NAME_TOKENS
         | _authorized_verb_forms(selected_facts)
     )
-    unauthorized = [token for token in answer_token_list if token not in authorized_tokens]
+    authorized_stems = {
+        stem for token in authorized_tokens for stem in _word_stems(token)
+    }
+    unauthorized = [
+        token
+        for token in answer_token_list
+        if token not in authorized_tokens and not (_word_stems(token) & authorized_stems)
+    ]
     if unauthorized:
         return RephraseVerdict(
             allowed=False,

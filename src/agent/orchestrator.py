@@ -831,8 +831,6 @@ class AgentService:
                 ]
                 if not mappings_are_valid:
                     verdict_code = "missing_fact_ids"
-                elif mapped_text != candidate.text.strip():
-                    verdict_code = "unmapped_text"
                 else:
                     rejected = next(
                         (verdict for verdict in proposition_verdicts if not verdict.allowed),

@@ -2,7 +2,7 @@
 
 import pytest
 
-from src.agent.rephrase import verify_rephrase
+from src.agent.rephrase import verify_rephrase, verify_synthesis_text
 from src.models.profile import load_profile
 from src.tools.profile_tools import ResumeFact, build_resume_fact_catalog
 
@@ -195,3 +195,78 @@ def test_numbers_with_thousand_separators_match_profile_vocabulary() -> None:
     verdict = verify_rephrase(text=text, selected_facts=selected, catalog=catalog, language="en")
 
     assert verdict.code == "accepted", verdict.details
+
+
+def test_a_verb_the_cited_fact_itself_uses_is_not_drift(catalog: list[ResumeFact]) -> None:
+    """The fact's leading verb is not the only verb it authorizes.
+
+    `hl-isv-module` reads "Collaborated in delivering ... Built an internal multi-agent
+    engineering workflow". Rejecting "built" rejects the fact's own wording.
+    """
+    isv_module = _fact(catalog, "experience:exp-global-payments.highlight:hl-isv-module")
+
+    verdict = verify_rephrase(
+        text=(
+            "Marco collaborated in delivering a new ISV module, beating deadline "
+            "expectations, by building an internal multi-agent engineering workflow."
+        ),
+        selected_facts=[isv_module],
+        catalog=catalog,
+        language="en",
+        require_each_fact_verb=False,
+    )
+
+    assert verdict.allowed, verdict.details
+
+
+def test_synthesis_admits_inflections_of_authorized_words(catalog: list[ResumeFact]) -> None:
+    """Compression rewrites grammar; "implemented" becoming "implementing" adds no fact."""
+    performance = _fact(catalog, "experience:exp-global-payments.highlight:hl-performance")
+
+    verdict = verify_synthesis_text(
+        text=(
+            "Marco resolved availability-affecting performance bottlenecks by "
+            "implementing Redis and SQL caching per Global Payments requirements."
+        ),
+        selected_facts=[performance],
+        catalog=catalog,
+        language="en",
+        dimension="summary",
+    )
+
+    assert verdict.allowed, verdict.details
+
+
+def test_synthesis_still_rejects_a_word_absent_from_the_selection(
+    catalog: list[ResumeFact],
+) -> None:
+    """Inflection tolerance must not become an opening for unrelated content."""
+    performance = _fact(catalog, "experience:exp-global-payments.highlight:hl-performance")
+
+    verdict = verify_synthesis_text(
+        text="Marco implemented caching, delighting every enterprise stakeholder.",
+        selected_facts=[performance],
+        catalog=catalog,
+        language="en",
+        dimension="summary",
+    )
+
+    assert not verdict.allowed
+    assert verdict.code == "unsupported_vocabulary"
+
+
+def test_a_possessive_s_is_tokenization_residue_not_a_claim(
+    catalog: list[ResumeFact],
+) -> None:
+    """`normalize_resume_text` splits "Marco's" into "marco" + "s"."""
+    sybil = _fact(catalog, "project:proj-sybil")
+
+    verdict = verify_synthesis_text(
+        text="Sybil is Marco's Retrieval-Augmented Generation system.",
+        selected_facts=[sybil],
+        catalog=catalog,
+        language="en",
+        dimension="summary",
+    )
+
+    assert verdict.allowed, verdict.details

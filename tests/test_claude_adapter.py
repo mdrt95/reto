@@ -270,10 +270,9 @@ def test_rephraser_extracts_text_from_fenced_json_and_never_sends_the_profile() 
         content=[
             SimpleNamespace(
                 text=(
-                    '```json\n{"text":"Marco built the Security Console.",'
-                    '"propositions":[{"text":"Marco built the Security Console.",'
-                    '"fact_ids":["fact:experience:exp-global-payments.highlight:'
-                    'hl-security-console"]}]}\n```'
+                    '```json\n{"propositions":[{"text":"Marco built the '
+                    'Security Console.","fact_ids":["fact:experience:'
+                    'exp-global-payments.highlight:hl-security-console"]}]}\n```'
                 )
             )
         ]
@@ -291,7 +290,7 @@ def test_rephraser_extracts_text_from_fenced_json_and_never_sends_the_profile() 
         language="en",
     )
 
-    assert transformation.text == "Marco built the Security Console."
+    assert transformation.propositions[0].text == "Marco built the Security Console."
     assert transformation.propositions[0].fact_ids == [facts[0].fact_id]
     request_json = json.dumps(client.messages.create.call_args.kwargs)
     assert '"profile"' not in request_json

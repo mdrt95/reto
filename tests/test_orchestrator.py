@@ -1025,7 +1025,6 @@ class _FixedTextRephraser:
     ) -> SynthesisTransformation:
         self.calls.append({"message": message, "facts": facts, "language": language})
         return SynthesisTransformation(
-            text=self._text,
             propositions=[
                 SynthesisProposition(
                     text=self._text,

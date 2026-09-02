@@ -82,6 +82,24 @@ RequestedField = Literal[
     "career_preferences",
 ]
 
+MAX_SYNTHESIS_FACTS = 3
+"""Evidence breadth one synthesis answer may draw on."""
+
+MAX_SYNTHESIS_PROPOSITIONS = 2
+"""Delivery cap shared by the provider contract and validation.
+
+Deliberately below `MAX_SYNTHESIS_FACTS`: a full selection cannot be expressed as one
+proposition per fact, so aggregation is structural rather than a prompt preference, and
+the one-sentence-per-fact dump becomes unreachable by construction.
+"""
+
+MAX_SYNTHESIS_SENTENCES = 3
+"""Default sentence budget for a synthesized answer and its canonical fallback."""
+
+MAX_SYNTHESIS_WORDS = 75
+"""Default word budget for a synthesized answer and its canonical fallback."""
+
+
 SynthesisDimension = Literal[
     "summary",
     "impact",
@@ -137,10 +155,16 @@ class SynthesisProposition(BaseModel):
 
 
 class SynthesisTransformation(BaseModel):
-    """Structured transformation output before deterministic containment checks."""
+    """Structured transformation output before deterministic containment checks.
 
-    text: str = Field(min_length=1)
-    propositions: list[SynthesisProposition] = Field(min_length=1, max_length=3)
+    The answer is carried only by `propositions`. A separate top-level copy of the
+    same prose cannot add a guarantee — delivery already joins the mapped
+    propositions — but it can drift from them and reject an otherwise valid answer.
+    """
+
+    propositions: list[SynthesisProposition] = Field(
+        min_length=1, max_length=MAX_SYNTHESIS_PROPOSITIONS
+    )
 
 
 class GroundingResult(BaseModel):
