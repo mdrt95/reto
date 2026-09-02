@@ -82,8 +82,16 @@ RequestedField = Literal[
     "career_preferences",
 ]
 
-MAX_SYNTHESIS_FACTS = 3
-"""Evidence breadth one synthesis answer may draw on."""
+MAX_SYNTHESIS_FACTS_BY_LANGUAGE = {"en": 3, "es": 2}
+"""Evidence breadth one synthesis answer may draw on, per response language.
+
+Spanish needs materially more words than English to state the same content, so the
+shared word budget buys fewer facts. Both languages rank the same evidence the same
+way; Spanish takes a shorter prefix of that ranking rather than a different scope.
+"""
+
+MAX_SYNTHESIS_FACTS = max(MAX_SYNTHESIS_FACTS_BY_LANGUAGE.values())
+"""The widest selection any language may make, and the bound tests assert against."""
 
 MAX_SYNTHESIS_PROPOSITIONS = 2
 """Delivery cap shared by the provider contract and validation.

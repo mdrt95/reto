@@ -189,10 +189,11 @@ def test_synthesis_contract_selects_bounded_evidence_and_compresses_it(
         ("What impact did Marco's work have?", "¿Qué impacto tuvo el trabajo de Marco?"),
     ],
 )
-def test_equivalent_synthesis_requests_select_identical_canonical_scopes(
+def test_equivalent_synthesis_requests_select_the_same_ranked_scope(
     english: str,
     spanish: str,
 ) -> None:
+    """Same dimension, same topic, same ranking; Spanish takes a prefix of it (D-036)."""
     profile = load_profile("data/profile.json")
     planner = AnswerPlanner(profile)
     tool_plan = summarize_profile(
@@ -205,8 +206,15 @@ def test_equivalent_synthesis_requests_select_identical_canonical_scopes(
 
     assert english_plan.synthesis_dimension == spanish_plan.synthesis_dimension
     assert english_plan.topic == spanish_plan.topic
-    assert english_plan.selected_fact_ids == spanish_plan.selected_fact_ids
-    assert english_plan.selected_source_ids == spanish_plan.selected_source_ids
+    assert english_plan.scope == spanish_plan.scope
+    assert english_plan.requested_field == spanish_plan.requested_field
+    # Spanish carries the same evidence in the same order, cut one earlier, so the two
+    # answers can never disagree about what matters most or cite something the other
+    # would not have selected.
+    assert spanish_plan.selected_fact_ids == english_plan.selected_fact_ids[
+        : len(spanish_plan.selected_fact_ids)
+    ]
+    assert len(spanish_plan.selected_fact_ids) < len(english_plan.selected_fact_ids)
 
 
 @pytest.mark.parametrize(
@@ -566,8 +574,10 @@ def test_bilingual_comparison_selects_equivalent_project_scope() -> None:
 
     assert english.synthesis_dimension == spanish.synthesis_dimension == "comparison"
     assert english.topic == spanish.topic == "projects"
-    assert english.selected_fact_ids == spanish.selected_fact_ids
-    assert english.selected_source_ids == spanish.selected_source_ids
+    # Same ranking, Spanish cut one earlier (D-036).
+    assert spanish.selected_fact_ids == english.selected_fact_ids[
+        : len(spanish.selected_fact_ids)
+    ]
 
 
 class MultiPropositionTransformation:

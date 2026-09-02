@@ -406,3 +406,34 @@ planner intercepts most requests that previously reached the multi-fact paths. T
 is intended: the notice marks a specific output shape, not a fallback in general.
 Bilingual boundary coverage is unaffected — the out-of-scope redirect, clarification,
 not-found, input-guard, and output-guard replies remain bilingual and tested.
+
+## D-036: Buy evidence breadth in words, not facts
+
+**Status:** Accepted (amends D-034)
+
+`MAX_SYNTHESIS_FACTS_BY_LANGUAGE` sets synthesis evidence breadth per response
+language: three facts in English, two in Spanish. Both languages rank the same
+candidate facts by the same dimension-relevance score; Spanish takes a shorter prefix
+of that identical ranking. It never selects a fact English would not have selected,
+never reorders, and never changes topic, scope, or requested field.
+
+**Why:** Spanish states the same content in materially more words than English, so a
+single shared 75-word budget buys fewer facts. Holding the fact count equal across
+languages did not produce equal answers — it produced a Spanish answer that was
+rejected as `too_long` and fell back to one canonical narrative, which is *less*
+evidence than the two facts it can now actually deliver. Selecting two facts and
+delivering them beats selecting three and delivering one.
+
+**Consequence:** This knowingly departs from Issue #2's "equivalent English and
+Spanish synthesis requests resolve to equivalent fact scopes" read as identical fact
+sets. The weaker guarantee that replaces it is prefix equivalence: same dimension,
+topic, scope, requested field, and ranking, with Spanish truncated one earlier. Two
+tests were rewritten to assert that contract rather than set equality. Issue #3's
+parity gate must be written against prefix equivalence, or this decision revisited.
+`MAX_SYNTHESIS_PROPOSITIONS` (2) no longer sits strictly below the Spanish fact limit,
+so a Spanish answer may map one proposition per fact; the `fact_dump` gate still
+requires three such propositions and remains unreachable at either limit.
+
+Live provider gate after this change: all five required Issue #1 examples render
+deterministically, and all five required Issue #2 examples deliver transformed
+synthesis within the 3-sentence/75-word budget in both languages.

@@ -7,7 +7,7 @@ from src.agent.contracts import (
     AnswerMode,
     AnswerPlan,
     ConversationState,
-    MAX_SYNTHESIS_FACTS,
+    MAX_SYNTHESIS_FACTS_BY_LANGUAGE,
     MAX_SYNTHESIS_SENTENCES,
     MAX_SYNTHESIS_WORDS,
     SynthesisDimension,
@@ -463,10 +463,11 @@ class AnswerPlanner:
         detail_requested = self.detail_requested(message)
         # Beyond this bound the 3-sentence/75-word delivery budget is unreachable, so
         # the extra evidence could only ever be discarded by a length rejection.
+        language_limit = MAX_SYNTHESIS_FACTS_BY_LANGUAGE[detect_response_language(message)]
         selection_limit = (
-            2
+            min(2, language_limit)
             if dimension in {"significance", "conclusion"} and not detail_requested
-            else MAX_SYNTHESIS_FACTS
+            else language_limit
         )
         bounded: list[ResumeFact] = []
         for fact in candidates:
