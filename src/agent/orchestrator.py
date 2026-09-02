@@ -350,6 +350,7 @@ class AgentService:
                 response.trace.rendering_mode = "informativeness_fallback"
                 response.trace.grounding_status = "fact_rendered"
                 response.trace.answer_topic = fact.topic
+                response.trace.evidence_topics = [fact.topic]
                 response.trace.selected_fact_ids = [fact.fact_id]
                 response.trace.selected_source_ids = [fact.source_id]
                 response.trace.claim_source_ids = [fact.source_id]
@@ -415,10 +416,11 @@ class AgentService:
             discussed_sources = _bounded(
                 discussed_sources + turn_sources, MAX_DISCUSSED_SOURCE_IDS
             )
-            if trace.answer_topic in _ANSWER_TOPICS:
-                discussed_topics = _bounded(
-                    [*discussed_topics, trace.answer_topic], MAX_DISCUSSED_TOPICS
-                )
+            for topic in trace.evidence_topics or [trace.answer_topic]:
+                if topic in _ANSWER_TOPICS:
+                    discussed_topics = _bounded(
+                        [*discussed_topics, topic], MAX_DISCUSSED_TOPICS
+                    )
             roots = list(
                 dict.fromkeys(
                     source_id.split(".highlight:", 1)[0] for source_id in turn_sources
@@ -902,6 +904,7 @@ class AgentService:
                 answer_mode=plan.mode.value,
                 rendering_mode="canonical",
                 answer_topic=plan.topic,
+                evidence_topics=plan.evidence_topics or [plan.topic],
                 answer_scope=plan.scope,
                 requested_field=plan.requested_field,
                 selected_fact_ids=plan.selected_fact_ids,
