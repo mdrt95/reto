@@ -51,6 +51,25 @@ the answer plan at all. `transformed` is the only mode whose wording the provide
 Operational gates from `PLAN.md` continue to apply: p95 latency at or below 8 seconds and
 estimated request cost at or below USD 0.03.
 
+## Two verification layers
+
+The scenario matrix is a regression suite, and passing it proves the implementation
+handles those phrasings. It cannot prove the hard gate's promise that reasonable résumé
+questions are robustly handled, because a fixed matrix never varies the dimension real
+users vary constantly: surface form. Verification is therefore split by cost.
+
+**Offline layer.** Paraphrase families, accent and punctuation perturbation, referent
+chains, and system invariants run against `AnswerPlanner`, `detect_response_language`,
+and the deterministic profile tools, which are provider-free by construction (D-033),
+with the classifier stubbed. Hundreds of variants in milliseconds, on every push.
+
+**Live layer.** The fixed scenario matrix, kept small, covering what genuinely needs a
+provider: prose, containment, and transformation.
+
+Every paraphrase family declares both the variants expected to resolve and the variants
+deliberately out of scope, each with a stated reason. A variant count is uninterpretable
+without its denominator, and an out-of-scope phrasing may be unresolved but never unsafe.
+
 ## Lean verification policy
 
 Maintain exactly these groups, and no more:
@@ -58,9 +77,21 @@ Maintain exactly these groups, and no more:
 1. the table-driven direct-answer contract group (`tests/test_direct_answer_plans.py`);
 2. the table-driven synthesis contract group (`tests/test_synthesis_contract.py`);
 3. the shared provider-failure and fallback group, carried within the two groups above;
-4. the evaluator-contract group (`tests/test_eval_contract.py`), which proves the checker
+4. the offline routing-invariant group (`tests/test_routing_invariants.py`), which
+   varies surface form across declared paraphrase families and asserts the system
+   invariants below, with negative controls proving its own detectors can fire;
+5. the evaluator-contract group (`tests/test_eval_contract.py`), which proves the checker
    can fail — a matrix that only ever passes is not evidence;
-5. the fixed bilingual UI release script below.
+6. the fixed bilingual UI release script below.
+
+### System invariants
+
+Asserted across every phrasing the offline layer knows, not per scenario:
+
+- the generator is never invoked with an empty allowed-fact set;
+- no question with sufficient canonical facts returns HTTP 503 or a clarification;
+- removing accents changes neither the detected language nor the resolved routing;
+- equivalent English and Spanish families resolve to the same dimension and topic.
 
 Do not add tests for exact generated prose, wording variants, spelling variants, or
 implementation details. Add a regression only for a new boundary, a new failure mode, or

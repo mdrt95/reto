@@ -7,6 +7,7 @@ from src.agent.claude import UnavailableGenerator as RealUnavailableGenerator
 from src.agent.contracts import (
     Claim,
     ClaimKind,
+    ConversationState,
     GeneratedResponse,
     GenerationUnavailableError,
     Intent,
@@ -1525,3 +1526,191 @@ def test_summary_fallback_uses_spanish_narrative_for_spanish_request() -> None:
     response = service.respond("Resume la experiencia de Marco", history=[])
 
     assert expected_narrative in response.answer
+
+
+class EmptyFactRecordingGenerator:
+    """Generator double that records the fact-set size of every invocation."""
+
+    def __init__(self) -> None:
+        self.allowed_fact_counts: list[int] = []
+
+    def generate(self, **kwargs: object) -> GeneratedResponse:
+        allowed_facts = kwargs.get("allowed_facts") or []
+        self.allowed_fact_counts.append(len(allowed_facts))
+        return GeneratedResponse(
+            text="Marco led the security console work at Global Payments.",
+            claims=[
+                Claim(
+                    text="Marco led the security console work at Global Payments.",
+                    kind=ClaimKind.DIRECT,
+                    source_ids=["experience:exp-global-payments"],
+                    evidence=["security console"],
+                )
+            ],
+        )
+
+
+class BroadSearchClassifier:
+    """Model-shaped broad search intent carrying no typed filter plan."""
+
+    def classify(self, message: str, history: list[object]) -> IntentDecision:
+        return IntentDecision(intent=Intent.SEARCH_QUERY, confidence=0.95)
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Cuales son los logros de Marco?",
+        "What are Marco's achievements?",
+        "Desde cuando Marco trabaja ahi?",
+        "Dónde estudió Marco?",
+        "¿Qué estudios tiene Marco?",
+    ],
+)
+def test_zero_selection_never_invokes_the_generator_with_an_empty_fact_set(
+    message: str,
+) -> None:
+    """A routing miss must never ask the generator for claims it cannot ground."""
+    generator = EmptyFactRecordingGenerator()
+    service = AgentService(
+        profile=load_profile("data/profile.json"),
+        classifier=BroadSearchClassifier(),
+        generator=generator,
+    )
+
+    response = service.respond(message, history=[])
+
+    assert 0 not in generator.allowed_fact_counts
+    assert response.answer
+    assert response.trace.selection_path in {"primary", "recovery", "none"}
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Desde cuando Marco trabaja ahi?",
+        "Dónde estudió Marco?",
+    ],
+)
+def test_unanchored_zero_selection_clarifies_without_substituting_facts(
+    message: str,
+) -> None:
+    """With no resolvable topic anchor, recovery must not return top-ranked facts."""
+    service = AgentService(
+        profile=load_profile("data/profile.json"),
+        classifier=BroadSearchClassifier(),
+        generator=EmptyFactRecordingGenerator(),
+    )
+
+    response = service.respond(message, history=[])
+
+    assert response.trace.rendering_mode == "clarification"
+    assert response.trace.selected_fact_ids == []
+    assert response.trace.selection_path == "none"
+
+
+def test_anchored_zero_selection_recovers_within_the_anchored_topic() -> None:
+    """A resolved topic anchor may recover facts, but only from that topic."""
+    profile = load_profile("data/profile.json")
+    service = AgentService(
+        profile=profile,
+        classifier=BroadSearchClassifier(),
+        generator=EmptyFactRecordingGenerator(),
+    )
+
+    response = service.respond("¿Qué estudios tiene Marco?", history=[])
+
+    assert response.trace.selection_path == "recovery"
+    assert response.trace.answer_topic == "education"
+    catalog = {fact.fact_id: fact for fact in build_resume_fact_catalog(profile)}
+    assert response.trace.selected_fact_ids
+    assert all(
+        catalog[fact_id].topic == "education"
+        for fact_id in response.trace.selected_fact_ids
+    )
+
+
+def test_ordinary_success_records_the_primary_selection_path() -> None:
+    """Recovery must be countable, so ordinary success carries its own path label."""
+    service = AgentService(
+        profile=load_profile("data/profile.json"),
+        classifier=BroadSearchClassifier(),
+        generator=EmptyFactRecordingGenerator(),
+    )
+
+    response = service.respond("What education does Marco have?", history=[])
+
+    assert response.trace.selected_fact_ids
+    assert response.trace.selection_path == "primary"
+
+
+def _global_payments_state() -> ConversationState:
+    """The state a prior Global Payments turn actually leaves behind."""
+    return ConversationState(
+        last_topic="experience",
+        last_source_ids=["experience:exp-global-payments"],
+        last_entities=["Global Payments (EVO Payments México)"],
+        last_tool="search_resume",
+        response_language="es",
+    )
+
+
+def test_single_unambiguous_state_entity_supplies_a_missing_date_referent() -> None:
+    """"Trabaja ahi" is answerable when verified state carries exactly one employer."""
+    service = AgentService(
+        profile=load_profile("data/profile.json"),
+        classifier=BroadSearchClassifier(),
+        generator=EmptyFactRecordingGenerator(),
+    )
+
+    response = service.respond(
+        "Desde cuando Marco trabaja ahi?",
+        history=[],
+        state=_global_payments_state(),
+    )
+
+    assert response.trace.requested_field == "start_date"
+    assert response.trace.answer_topic == "experience"
+    assert response.trace.referent_source == "state"
+    assert "2025" in response.answer
+
+
+def test_multi_entity_state_still_fails_closed_to_clarification() -> None:
+    """Ambiguous state must never be resolved by picking one of several employers."""
+    state = ConversationState(
+        last_topic="experience",
+        last_source_ids=["experience:exp-global-payments"],
+        last_entities=["Global Payments (EVO Payments México)", "Sybil"],
+    )
+    service = AgentService(
+        profile=load_profile("data/profile.json"),
+        classifier=BroadSearchClassifier(),
+        generator=EmptyFactRecordingGenerator(),
+    )
+
+    response = service.respond("Desde cuando Marco trabaja ahi?", history=[], state=state)
+
+    assert response.trace.rendering_mode == "clarification"
+    assert response.trace.referent_source is None
+
+
+def test_an_explicit_message_entity_outranks_conversation_state() -> None:
+    """History can supply a missing referent, never replace one the message states."""
+    state = ConversationState(
+        last_topic="projects",
+        last_source_ids=["projects:sybil"],
+        last_entities=["Sybil"],
+    )
+    service = AgentService(
+        profile=load_profile("data/profile.json"),
+        classifier=BroadSearchClassifier(),
+        generator=EmptyFactRecordingGenerator(),
+    )
+
+    response = service.respond(
+        "¿Desde cuándo trabaja Marco en Global Payments?", history=[], state=state
+    )
+
+    assert response.trace.requested_field == "start_date"
+    assert response.trace.referent_source == "message"
+    assert "2025" in response.answer

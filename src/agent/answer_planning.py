@@ -1,6 +1,7 @@
 """Deterministic answer planning and canonical direct-answer rendering."""
 
 import re
+from collections import Counter
 from typing import Literal
 
 from src.agent.contracts import (
@@ -50,7 +51,12 @@ _MONTH_NAMES = {
 
 _SYNTHESIS_MARKERS: dict[SynthesisDimension, tuple[str, ...]] = {
     "summary": ("summarize", "summary", "resume la", "resumen"),
-    "impact": ("impact", "impacto", "outcome", "resultado", "efecto"),
+    # Achievement wording points at the outcome-bearing facts the impact dimension
+    # already selects and already ranks; matching is substring, so plurals are covered.
+    "impact": (
+        "impact", "impacto", "outcome", "resultado", "efecto",
+        "achiev", "accomplish", "logro",
+    ),
     "significance": (
         "significance", "significancia", "why does", "why is", "por que importa",
         "importancia",
@@ -82,7 +88,11 @@ class AnswerPlanner:
     def __init__(self, profile: Profile) -> None:
         self._profile = profile
 
-    def explicit_direct_plan(self, message: str) -> AnswerPlan | None:
+    def explicit_direct_plan(
+        self,
+        message: str,
+        state: ConversationState | None = None,
+    ) -> AnswerPlan | None:
         """Resolve bounded current-message evidence before advisory classifier fields.
 
         The order is deliberate: field/date questions are narrower than tags,
@@ -114,17 +124,15 @@ class AnswerPlanner:
             for experience in self._profile.experience:
                 if not self._message_mentions_company(normalized, experience.company):
                     continue
-                fact_ids = [f"fact:experience:{experience.id}:{date_field}"]
-                if date_field == "start_date":
-                    fact_ids.append(f"fact:experience:{experience.id}:current")
-                return self._plan(
-                    mode=AnswerMode.DIRECT,
-                    topic="experience",
-                    scope="employment",
-                    requested_field=date_field,
-                    language=language,
-                    facts=[facts_by_id[fact_id] for fact_id in fact_ids],
-                )
+                return self._date_plan(experience, date_field, language, facts_by_id)
+            # Only once the current message names no employer may verified state
+            # supply the missing referent. An explicit entity always outranks state.
+            referred = self._state_referent_company(state)
+            if referred is not None:
+                for experience in self._profile.experience:
+                    if experience.company != referred:
+                        continue
+                    return self._date_plan(experience, date_field, language, facts_by_id)
 
         matched_tag = self.profile_tag_match(message)
         if matched_tag is not None:
@@ -393,6 +401,21 @@ class AnswerPlanner:
             topic = fallback_topic
             scope = fallback_scope
             requested_field = fallback_field
+            if dimension == "impact" and topic == "summary":
+                # An unscoped impact question ("achievements", "logros") carries no
+                # topic token, but the outcome evidence it asks for is never in the
+                # summary topic, so the fallback selects nothing. Anchor on the topic
+                # that actually holds the canonical outcome facts. No fact is derived:
+                # the predicate is the same one the impact branch already filters on.
+                outcome_topics = Counter(
+                    fact.topic
+                    for fact in catalog
+                    if fact.field_name is None and self._has_explicit_outcome(fact)
+                )
+                if outcome_topics:
+                    topic = outcome_topics.most_common(1)[0][0]
+                    scope = "project" if topic == "projects" else "employment"
+                    requested_field = "projects" if topic == "projects" else "experience"
 
         topic_facts = [
             fact
@@ -576,6 +599,43 @@ class AnswerPlanner:
                 if fact.source_id == source_id and fact.field_name is None:
                     ordered.append(fact.fact_id)
         return ordered
+
+    def _date_plan(
+        self,
+        experience: object,
+        date_field: Literal["start_date", "end_date", "current"],
+        language: Literal["en", "es"],
+        facts_by_id: dict[str, ResumeFact],
+    ) -> AnswerPlan:
+        """Build the smallest canonical fact set answering one employment date."""
+        fact_ids = [f"fact:experience:{experience.id}:{date_field}"]
+        if date_field == "start_date":
+            fact_ids.append(f"fact:experience:{experience.id}:current")
+        return self._plan(
+            mode=AnswerMode.DIRECT,
+            topic="experience",
+            scope="employment",
+            requested_field=date_field,
+            language=language,
+            facts=[facts_by_id[fact_id] for fact_id in fact_ids],
+        )
+
+    def _state_referent_company(self, state: ConversationState | None) -> str | None:
+        """Resolve exactly one profile employer from verified state, or nothing.
+
+        Zero entities, several entities, and an entity that is not a single profile
+        employer all fail closed. An ambiguous referent must reach clarification;
+        guessing one of several employers is how a confident wrong answer happens.
+        """
+        if state is None or len(state.last_entities) != 1:
+            return None
+        entity = normalize_resume_text(state.last_entities[0])
+        companies = [
+            experience.company
+            for experience in self._profile.experience
+            if normalize_resume_text(experience.company) == entity
+        ]
+        return companies[0] if len(companies) == 1 else None
 
     def boundary_plan(
         self,

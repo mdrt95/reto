@@ -39,6 +39,7 @@ from src.guardrails.output_guard import evaluate_output
 from src.models.profile import Profile
 from src.tools.profile_tools import (
     ExperienceFilterResult,
+    detect_resume_topic,
     ProfileQueryResult,
     ProfileSummaryPlan,
     ProjectSearchResult,
@@ -228,6 +229,23 @@ class AgentService:
         history: list[object],
         state: ConversationState | None = None,
     ) -> AgentResponse:
+        """Answer one turn and record which selection path produced the answer."""
+        response = self._respond(message, history=history, state=state)
+        if response.trace.selection_path is None and response.trace.guardrail_input != "blocked":
+            # Recovery marks itself; everything else that reached fact selection is
+            # ordinary success or an explicit empty selection, never folded together.
+            response.trace.selection_path = (
+                "primary" if response.trace.selected_fact_ids else "none"
+            )
+        return response
+
+    def _respond(
+        self,
+        message: str,
+        *,
+        history: list[object],
+        state: ConversationState | None = None,
+    ) -> AgentResponse:
         """Answer safely or return a verified boundary response for this turn."""
         input_result = evaluate_input(message)
         if not input_result.allowed:
@@ -257,6 +275,13 @@ class AgentService:
             )
 
         explicit_plan = self._answer_planner.explicit_direct_plan(message)
+        referent_source: Literal["message", "state"] | None = (
+            "message" if explicit_plan is not None else None
+        )
+        if explicit_plan is None:
+            state_plan = self._answer_planner.explicit_direct_plan(message, state)
+            if state_plan is not None:
+                explicit_plan, referent_source = state_plan, "state"
         follow_up = None if explicit_plan is not None else self._follow_up_plan(message, state, history)
         if follow_up == "clarify":
             language = detect_response_language(message)
@@ -310,12 +335,14 @@ class AgentService:
                     raise
                 decision = IntentDecision(intent=Intent.FOLLOW_UP, confidence=1.0)
         if explicit_plan is not None:
-            return self._direct_plan_response(
+            explicit_response = self._direct_plan_response(
                 plan=explicit_plan,
                 decision=decision,
                 message=message,
                 fallback_reason=fallback_reason,
             )
+            explicit_response.trace.referent_source = referent_source
+            return explicit_response
         if decision.intent in {Intent.OUT_OF_SCOPE, Intent.ADVERSARIAL}:
             language = detect_response_language(message)
             answer = (
@@ -413,11 +440,23 @@ class AgentService:
             if synthesis_response is not None:
                 return synthesis_response
         allowed_sources = profile_source_ids(self._profile)
-        selected_fact_ids = set(self._answer_planner.ordered_fact_ids(tool_result))
+        tool_ordered_fact_ids = self._answer_planner.ordered_fact_ids(tool_result)
+        if not tool_ordered_fact_ids:
+            # Zero selection is an explicit state, not a degenerate success. Asking the
+            # generator for grounded claims with no allowed facts is unanswerable by
+            # construction and surfaces as a 503.
+            return self._zero_selection_response(
+                decision=decision,
+                message=message,
+                tool_name=tool_name,
+                tool_result_count=tool_result_count,
+                fallback_reason=fallback_reason,
+                state=state,
+            )
+        selected_fact_ids = set(tool_ordered_fact_ids)
         allowed_facts = self._allowed_facts(selected_fact_ids)
         if self._rephraser is not None:
-            tool_ordered_fact_ids = self._answer_planner.ordered_fact_ids(tool_result)
-            if 0 < len(tool_ordered_fact_ids) <= 8:
+            if len(tool_ordered_fact_ids) <= 8:
                 rendered = self._fact_selection_response(
                     decision=decision,
                     ordered_fact_ids=tool_ordered_fact_ids,
@@ -1298,6 +1337,67 @@ class AgentService:
         if isinstance(tool_result, ProfileSummaryPlan):
             return bool(tool_result.source_ids)
         return bool(getattr(tool_result, "matches", []))
+
+    def _zero_selection_response(
+        self,
+        *,
+        decision: IntentDecision,
+        message: str,
+        tool_name: str | None,
+        tool_result_count: int,
+        fallback_reason: str | None,
+        state: ConversationState | None,
+    ) -> AgentResponse:
+        """Resolve a turn that selected no facts without ever reaching the generator.
+
+        Recovery is topic-anchored on purpose. Where the message evidences no anchor,
+        the turn clarifies instead of substituting the highest-ranked facts of an
+        unrelated topic, which would answer confidently and wrongly at HTTP 200.
+        """
+        anchor = detect_resume_topic(self._profile, message)
+        if anchor is not None:
+            recovered = search_resume(
+                self._profile,
+                SearchResumeArguments(query=message, topic=anchor),
+            )
+            recovered_fact_ids = self._answer_planner.ordered_fact_ids(recovered)
+            if recovered_fact_ids:
+                recovery_plan = self._answer_planner.plan_from_tool(message, recovered)
+                rendered = self._fact_selection_response(
+                    decision=decision,
+                    ordered_fact_ids=recovered_fact_ids,
+                    tool_name=tool_name,
+                    tool_result=recovered,
+                    tool_result_count=len(recovered.matches),
+                    message=message,
+                    generator_skipped=True,
+                    answer_plan=recovery_plan,
+                    fallback_reason=fallback_reason,
+                )
+                if rendered is not None:
+                    rendered.trace.selection_path = "recovery"
+                    return rendered
+        language = detect_response_language(message)
+        boundary_plan = self._answer_planner.boundary_plan(message, state)
+        answer = (
+            "¿Podrías aclarar a qué parte del perfil profesional de Marco te refieres?"
+            if language == "es"
+            else "Could you clarify which part of Marco's professional profile you mean?"
+        )
+        return AgentResponse(
+            answer=answer,
+            trace=AgentTrace(
+                intent=decision.intent.value,
+                intent_confidence=decision.confidence,
+                tool_name=tool_name,
+                tool_result_count=tool_result_count,
+                grounding_status="clarification",
+                fallback_reason=fallback_reason,
+                generator_skipped=True,
+                selection_path="none",
+                **plan_trace_fields(boundary_plan, "clarification"),
+            ),
+        )
 
     def _allowed_facts(self, selected_fact_ids: set[str]) -> list[ResumeFact]:
         """Resolve the turn's selected fact IDs into the canonical facts the generator may cite."""

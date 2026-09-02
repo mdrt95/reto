@@ -190,17 +190,83 @@ def normalize_resume_text(text: str) -> str:
     return " ".join(_TOKEN_ALIASES.get(token, token) for token in tokens)
 
 
+_SPANISH_ONLY_CHARACTERS = frozenset("ñáéíóúü¿¡")
+"""Orthography no English sentence contains. Contributing evidence, never decisive:
+an unaccented sentence must reach the same verdict as its accented form."""
+
+_SPANISH_FUNCTION_WORDS = frozenset({
+    "que", "qué", "cual", "cuales", "como", "donde", "cuando", "quien", "quienes",
+    "cuanto", "cuanta", "cuantos", "cuantas", "desde", "hasta", "para", "por",
+    "porque", "pero", "tambien", "ademas", "entre", "hacia", "segun", "sin",
+    "sobre", "tras", "durante", "cada", "todo", "toda", "todos", "todas", "otro",
+    "otra", "este", "esta", "estos", "estas", "ese", "esa", "esos", "esas",
+    "aquel", "aqui", "ahi", "alli", "alla", "de", "del", "la", "el", "los", "las",
+    "un", "una", "unos", "unas", "su", "sus", "tu", "tus", "mi", "mis", "y", "o",
+    "es", "son", "era", "fue", "fueron", "ser", "estar", "tiene", "tienen",
+    "hay", "muy", "mas", "menos", "bien", "en", "con", "al", "lo", "le", "les",
+    "se", "ya", "tiempo", "trabaja", "habla", "quiero", "saber", "dime",
+    "platicame", "cuentame", "hablame", "explicame", "muestrame", "dame",
+})
+"""Closed-class Spanish words. A contributor to the score, not the classifier."""
+
+_SPANISH_STEMS = (
+    "proyecto", "experiencia", "tecnolog", "habilidad", "idioma", "estudi",
+    "trabaj", "logro", "empresa", "puesto", "carrera", "ingenier", "construi",
+    "resumen", "certificacion", "educacion",
+)
+"""Open-class stems, matched by prefix so plurals and inflections are covered."""
+
+_SPANISH_SUFFIXES = (
+    "cion", "ciones", "dad", "dades", "mente", "ando", "iendo", "aron", "aste",
+    "iste", "amos", "emos", "aban", "aria", "eria",
+)
+"""Morphology carrying Spanish regardless of vocabulary. Applied only to longer
+tokens, where English collisions ("waste", "baron", "dad") cannot reach."""
+
+_ENGLISH_FUNCTION_WORDS = frozenset({
+    "what", "which", "where", "when", "who", "whom", "how", "why", "is", "are",
+    "was", "were", "do", "does", "did", "have", "had", "the", "an", "of", "for",
+    "in", "on", "at", "to", "from", "with", "about", "your", "yours", "you",
+    "yourself", "his", "her", "their", "there", "that", "this", "these", "those",
+    "tell", "show", "been", "being", "can", "could", "would", "should", "and",
+    "but", "long", "much", "many", "any", "all", "give", "list", "summarize",
+})
+"""Deliberately excludes tokens both languages share ("a", "no", "me", "has"),
+which would otherwise score English for a Spanish sentence."""
+
+
+def _language_tokens(text: str) -> list[str]:
+    """Split on non-alphanumerics after accent folding.
+
+    Unlike `normalize_resume_text` this keeps no punctuation inside a token, so a
+    sentence-final marker ("proyecto.") is still that marker, and applies no cross
+    language aliases, which would erase the very evidence being weighed.
+    """
+    decomposed = unicodedata.normalize("NFKD", text.casefold())
+    folded = "".join(character for character in decomposed if not unicodedata.combining(character))
+    return re.findall(r"[a-z0-9]+", folded)
+
+
 def detect_response_language(text: str) -> Literal["en", "es"]:
-    """Choose Spanish only from explicit, bounded lexical evidence."""
-    normalized = normalize_resume_text(text)
-    spanish_markers = {
-        "cual", "que", "como", "con", "construiste", "experiencia", "proyecto",
-        "puesto", "tecnologia", "tu", "y",
-        "de", "la", "el", "los", "las", "del", "en", "es",
-        "sobre", "sus", "su", "platicame", "cuentame", "hablame", "habilidades",
-        "cuales", "esta", "bien", "sobre", "dime", "quiero", "saber",
-    }
-    return "es" if set(normalized.split()) & spanish_markers else "en"
+    """Weigh orthographic, morphological, and lexical evidence for the reply language.
+
+    A closed marker list cannot be the classifier: it omits whatever nobody thought
+    to type, and every omission answers a Spanish question in English. Evidence is
+    scored instead, and English wins ties so an unrecognized sentence keeps the
+    previous default.
+    """
+    tokens = _language_tokens(text)
+    spanish = sum(1 for token in tokens if token in _SPANISH_FUNCTION_WORDS)
+    spanish += sum(1 for token in tokens if token.startswith(_SPANISH_STEMS))
+    spanish += sum(
+        1
+        for token in tokens
+        if len(token) >= 6 and token.endswith(_SPANISH_SUFFIXES)
+    )
+    if any(character in _SPANISH_ONLY_CHARACTERS for character in text.casefold()):
+        spanish += 1
+    english = sum(1 for token in tokens if token in _ENGLISH_FUNCTION_WORDS)
+    return "es" if spanish > english else "en"
 
 
 def _source_related(left: str, right: str) -> bool:
@@ -472,6 +538,17 @@ def _detect_topic(normalized_query: str, catalog: list[ResumeFact]) -> ResumeTop
         if fact.entity and normalize_resume_text(fact.entity) in normalized_query:
             return fact.topic
     return None
+
+
+def detect_resume_topic(profile: Profile, message: str) -> ResumeTopic | None:
+    """Resolve the topic a message anchors to, or None when no anchor is evidenced.
+
+    `search_resume` deliberately widens an unresolved anchor to the broad `summary`
+    topic so it always returns something. A caller deciding whether recovery is even
+    permitted must see the unresolved case, because substituting summary facts for an
+    unanchored question is how unrelated facts reach an answer.
+    """
+    return _detect_topic(normalize_resume_text(message), build_resume_fact_catalog(profile))
 
 
 def search_resume(profile: Profile, arguments: SearchResumeArguments) -> ResumeSearchResult:
