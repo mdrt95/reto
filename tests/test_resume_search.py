@@ -113,8 +113,8 @@ def test_unknown_entity_check_handles_case_dots_and_title_case(message: str, exp
     assert find_unknown_entities(profile, message) == expected
 
 
-def test_spanish_search_result_renders_the_spanish_narrative_for_a_highlight() -> None:
-    """A Spanish resume search must render a highlight's Spanish narrative, not raw text."""
+def test_spanish_direct_project_question_renders_the_project_record_narrative() -> None:
+    """A broad Spanish project question renders the smallest project record, not siblings."""
     from src.agent.claude import UnavailableClassifier, UnavailableGenerator
     from src.agent.orchestrator import AgentService
 
@@ -127,9 +127,11 @@ def test_spanish_search_result_renders_the_spanish_narrative_for_a_highlight() -
 
     response = service.respond("¿Qué proyectos has construido?", history=[])
 
-    first_highlight = profile.projects[0].highlights[0]
-    assert first_highlight.narrative is not None
-    assert first_highlight.narrative.es in response.answer
+    project = profile.projects[0]
+    assert project.narrative is not None
+    assert response.answer == project.narrative.es
+    assert response.trace.answer_mode == "direct"
+    assert response.trace.selected_source_ids == [f"project:{project.id}"]
 
 
 @pytest.mark.parametrize(

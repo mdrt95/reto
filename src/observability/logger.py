@@ -24,6 +24,14 @@ class TurnLogEvent(BaseModel):
     rephrase_outcome: str | None = None
     fallback_reason: str | None = None
     generator_skipped: bool = False
+    answer_mode: str | None = None
+    rendering_mode: str | None = None
+    synthesis_dimension: str | None = None
+    transformation_outcome: str | None = None
+    final_word_count: int | None = None
+    final_sentence_count: int | None = None
+    selected_fact_count: int = 0
+    selected_source_count: int = 0
     claim_source_count: int = 0
     latency_total_ms: int
     latency_intent_ms: int | None = None

@@ -12,6 +12,8 @@ from src.agent.contracts import (
     Intent,
     IntentDecision,
     InvalidStructuredOutputError,
+    SynthesisProposition,
+    SynthesisTransformation,
 )
 from src.agent.orchestrator import AgentService
 from src.models.profile import load_profile
@@ -339,23 +341,20 @@ class FailsOnGroundingRetryGenerator:
         return FabricatingGenerator().generate()
 
 
-def test_filter_request_falls_back_to_verified_tool_facts() -> None:
-    """Failed model grounding must not discard exact read-only tool results."""
+def test_open_filter_synthesis_falls_back_to_verified_tool_facts() -> None:
+    """Unmapped synthesis prose must not discard exact read-only tool results."""
     service = AgentService(
         profile=load_profile("data/profile.json"),
         classifier=SecurityClassifier(),
         generator=FabricatingGenerator(),
     )
 
-    response = service.respond("What security work has Marco done?", history=[])
+    response = service.respond("Show the matching work.", history=[])
 
     assert response.trace.tool_name == "filter_experience"
-    assert response.trace.grounding_status == "not_grounded"
-    assert response.answer.startswith(
-        "I couldn't compose a written answer right now, so here are the verified "
-        "profile facts instead:"
-    )
-    assert "Built an internal Security Console" in response.answer
+    assert response.trace.grounding_status == "tool_fallback"
+    assert not response.answer.startswith("I couldn't compose")
+    assert "security" in response.answer.casefold()
     assert "Google" not in response.answer
     assert "experience:exp-global-payments.highlight:hl-security-console" in (
         response.trace.claim_source_ids
@@ -370,15 +369,15 @@ def test_search_intent_with_filter_fields_uses_the_filter_tool() -> None:
         generator=FabricatingGenerator(),
     )
 
-    response = service.respond("What security work has Marco done?", history=[])
+    response = service.respond("Show the matching work.", history=[])
 
     assert response.trace.tool_name == "filter_experience"
     assert response.trace.tool_result_count >= 1
-    assert "Built an internal Security Console" in response.answer
+    assert "security" in response.answer.casefold()
 
 
-def test_regeneration_returns_only_claims_that_pass_grounding() -> None:
-    """A mixed response must salvage verified facts without exposing unsupported text."""
+def test_unmapped_mixed_synthesis_uses_only_the_canonical_fallback() -> None:
+    """Source-only claims cannot cross the stricter fact-mapped synthesis boundary."""
     generator = PartiallyGroundedGenerator()
     service = AgentService(
         profile=load_profile("data/profile.json"),
@@ -386,29 +385,32 @@ def test_regeneration_returns_only_claims_that_pass_grounding() -> None:
         generator=generator,
     )
 
-    response = service.respond("What security work has Marco done?", history=[])
+    response = service.respond("Show the matching work.", history=[])
 
-    assert response.answer == generator.verified_text
+    assert "security" in response.answer.casefold()
     assert "Google" not in response.answer
-    assert response.trace.grounding_status == "partially_grounded"
-    assert response.trace.claim_source_ids == [
-        "experience:exp-global-payments.highlight:hl-security-console"
-    ]
-    assert generator.calls == 2
+    assert response.trace.grounding_status == "tool_fallback"
+    assert "experience:exp-global-payments.highlight:hl-security-console" in (
+        response.trace.claim_source_ids
+    )
+    assert generator.calls == 1
 
 
-def test_fully_grounded_response_drops_uncited_free_text() -> None:
-    """Only validated claim text may cross the public boundary."""
+def test_synthesis_without_fact_mappings_falls_back_and_drops_uncited_text() -> None:
+    """Direct source excerpts cannot satisfy the synthesis proposition-mapping contract."""
     service = AgentService(
         profile=load_profile("data/profile.json"),
         classifier=BroadProjectQueryClassifier(),
         generator=GroundedClaimWithUnclaimedTextGenerator(),
     )
 
-    response = service.respond("Which projects used AI or data platforms?", history=[])
+    response = service.respond(
+        "Summarize which projects used AI or data platforms.", history=[]
+    )
 
     assert "Google" not in response.answer
-    assert response.trace.grounding_status == "fully_grounded"
+    assert response.trace.grounding_status == "tool_fallback"
+    assert response.trace.transformation_outcome == "rejected:missing_fact_ids"
 
 
 def test_injection_is_rejected_without_classifier_or_generator() -> None:
@@ -465,7 +467,7 @@ def test_employer_question_routes_and_falls_back_to_exact_profile_values() -> No
     [
         ("What security-related work has Marco done?", "filter_experience"),
         ("Summarize Marco’s experience.", "summarize_profile"),
-        ("Which projects used AI or data platforms?", "search_projects"),
+        ("Explain which projects used AI or data platforms in your own words.", "search_projects"),
     ],
 )
 def test_frontend_and_custom_questions_complete_offline(
@@ -483,7 +485,12 @@ def test_frontend_and_custom_questions_complete_offline(
 
     assert response.answer
     assert response.trace.tool_name == expected_tool
-    assert response.trace.grounding_status == "fully_grounded"
+    expected_grounding = (
+        "fact_rendered"
+        if message == "What security-related work has Marco done?"
+        else "tool_fallback"
+    )
+    assert response.trace.grounding_status == expected_grounding
     assert response.trace.claim_source_ids
 
 
@@ -515,18 +522,21 @@ def test_summary_uses_exact_tool_facts_when_generation_is_unavailable() -> None:
 
     assert response.trace.tool_name == "summarize_profile"
     assert response.trace.grounding_status == "tool_fallback"
-    assert response.answer.startswith(
-        "I couldn't compose a written answer right now, so here are the verified "
-        "profile facts instead:"
-    )
+    assert response.trace.answer_mode == "synthesis"
+    assert response.trace.rendering_mode == "canonical_fallback"
+    assert response.trace.selected_fact_ids
+    # A single reviewed narrative is prose, not a list of facts, so it carries no
+    # apology; the trace still records that this turn fell back (D-024).
+    assert not response.answer.startswith("I couldn't compose")
+    assert response.trace.rendering_mode == "canonical_fallback"
     assert "Jr. .NET Developer (Full-Stack)" in response.answer
     assert "Global Payments (EVO Payments México)" in response.answer
     assert response.trace.tool_result_count > 0
     assert response.trace.claim_source_ids
 
 
-def test_summary_fallback_notice_is_localized_to_spanish() -> None:
-    """The bilingual fallback notice must localize to a Spanish request."""
+def test_spanish_synthesis_fallback_reads_as_an_answer_not_an_apology() -> None:
+    """A Spanish fallback must deliver its reviewed narrative without announcing failure."""
     service = AgentService(
         profile=load_profile("data/profile.json"),
         classifier=SummaryClassifier(),
@@ -535,10 +545,9 @@ def test_summary_fallback_notice_is_localized_to_spanish() -> None:
 
     response = service.respond("Resume la experiencia de Marco.", history=[])
 
-    assert response.answer.startswith(
-        "No pude redactar una respuesta en este momento, así que estos son los "
-        "datos verificados del perfil:"
-    )
+    assert response.trace.rendering_mode == "canonical_fallback"
+    assert not response.answer.startswith("No pude redactar")
+    assert response.answer.startswith("Marco trabaja")
 
 
 def test_broad_ai_data_project_query_falls_back_to_sourceable_keyword_matches() -> None:
@@ -610,7 +619,7 @@ def test_specialized_experience_profile_and_summary_results_create_verified_stat
         (
             AgentService(profile=profile, classifier=SummaryClassifier(), generator=UnavailableGenerator()),
             "Summarize Marco's experience.",
-            "summary",
+            "experience",
             "summarize_profile",
             ["Global Payments (EVO Payments México)"],
         ),
@@ -682,10 +691,11 @@ def test_classifier_provider_outage_recovers_a_clear_resume_request() -> None:
 
     response = service.respond("¿Qué proyectos has construido?", history=[])
 
-    assert response.trace.tool_name == "search_resume"
-    assert response.trace.grounding_status == "tool_fallback"
+    assert response.trace.tool_name == "search_projects"
+    assert response.trace.grounding_status == "fact_rendered"
+    assert response.trace.answer_mode == "direct"
     assert response.trace.claim_source_ids
-    assert "proyectos" in response.answer.casefold()
+    assert "Sybil" in response.answer
 
 
 def test_incomplete_classifier_plan_uses_universal_resume_search() -> None:
@@ -697,7 +707,8 @@ def test_incomplete_classifier_plan_uses_universal_resume_search() -> None:
 
     response = service.respond("What projects has Marco worked in?", history=[])
 
-    assert response.trace.tool_name == "search_resume"
+    assert response.trace.tool_name == "search_projects"
+    assert response.trace.answer_mode == "direct"
     assert "Sybil" in response.answer
 
 
@@ -716,7 +727,7 @@ def test_contradictory_fact_citation_is_replaced_by_canonical_rendering(message:
 
     assert "Google" not in response.answer
     assert "Global Payments" in response.answer
-    assert response.trace.grounding_status == "fact_rendered"
+    assert response.trace.grounding_status == "tool_fallback"
 
 
 def test_classifier_failure_modes_do_not_change_universal_deterministic_answer() -> None:
@@ -738,7 +749,7 @@ def test_classifier_failure_modes_do_not_change_universal_deterministic_answer()
 
     assert len({response.answer for response in responses}) == 1
     assert all(response.trace.tool_name == "search_resume" for response in responses)
-    assert all(response.trace.grounding_status == "tool_fallback" for response in responses)
+    assert all(response.trace.grounding_status == "fact_rendered" for response in responses)
 
 
 def test_provider_outage_does_not_turn_out_of_scope_input_into_profile_content() -> None:
@@ -963,11 +974,22 @@ def test_summary_request_with_skills_marker_routes_to_query_profile() -> None:
     response = service.respond("Está bien, platícame sobre sus habilidades", history=[])
 
     assert response.trace.tool_name == "query_profile"
-    assert profile.skills.programming_languages[0] in response.answer
+    assert response.trace.answer_mode == "synthesis"
+    assert response.trace.selected_fact_ids
+    assert any(
+        skill in response.answer
+        for skill in [
+            *profile.skills.programming_languages,
+            *profile.skills.ai_llm,
+            *profile.skills.ai_stack,
+            *profile.skills.backend_apis,
+            *profile.skills.devops_engineering,
+        ]
+    )
 
 
-def test_generation_failure_on_grounding_retry_uses_verified_tool_facts() -> None:
-    """A locally invalid second generation must not leak a 503 when tool facts exist."""
+def test_rejected_synthesis_does_not_spend_a_second_generation_call() -> None:
+    """A rejected transformation falls back immediately when selected facts exist."""
     generator = FailsOnGroundingRetryGenerator()
     service = AgentService(
         profile=load_profile("data/profile.json"),
@@ -975,11 +997,11 @@ def test_generation_failure_on_grounding_retry_uses_verified_tool_facts() -> Non
         generator=generator,
     )
 
-    response = service.respond("What security-related work has Marco done?", history=[])
+    response = service.respond("Show the matching work.", history=[])
 
-    assert generator.calls == 2
+    assert generator.calls == 1
     assert response.trace.grounding_status == "tool_fallback"
-    assert "Built an internal Security Console" in response.answer
+    assert "security" in response.answer.casefold()
     assert response.trace.claim_source_ids
 
 
@@ -990,9 +1012,24 @@ class _FixedTextRephraser:
         self._text = text
         self.calls: list[dict[str, object]] = []
 
-    def rephrase(self, *, message: str, facts: list[ResumeFact], language: str) -> str:
+    def rephrase(
+        self,
+        *,
+        message: str,
+        facts: list[ResumeFact],
+        language: str,
+
+        feedback: str | None = None,
+    ) -> SynthesisTransformation:
         self.calls.append({"message": message, "facts": facts, "language": language})
-        return self._text
+        return SynthesisTransformation(
+            propositions=[
+                SynthesisProposition(
+                    text=self._text,
+                    fact_ids=[fact.fact_id for fact in facts],
+                )
+            ],
+        )
 
 
 class _UnavailableRephraser:
@@ -1024,8 +1061,8 @@ def test_escalating_rephrase_is_rejected_and_falls_back_to_canonical_rendering(m
     assert rejected.trace.generator_skipped is True
 
 
-def test_faithful_rephrase_is_accepted_and_delivered(message: str = "What is your experience?") -> None:
-    """With a rephraser configured, all six tool-selected experience facts are the selection (D-030)."""
+def test_faithful_but_uncompressed_rephrase_is_rejected(message: str = "What is your experience?") -> None:
+    """Grounded prose must still obey the fixed synthesis budget."""
     profile = load_profile("data/profile.json")
     experience_facts = [fact for fact in build_resume_fact_catalog(profile) if fact.topic == "experience"]
     faithful_rephrase = " ".join(fact.narrative_en for fact in experience_facts if fact.narrative_en)
@@ -1037,9 +1074,11 @@ def test_faithful_rephrase_is_accepted_and_delivered(message: str = "What is you
         rephraser=_FixedTextRephraser(faithful_rephrase),
     ).respond(message, history=[])
 
-    assert accepted.answer == faithful_rephrase
-    assert accepted.trace.grounding_status == "rephrased"
-    assert accepted.trace.rephrase_outcome == "accepted"
+    assert accepted.answer != faithful_rephrase
+    assert accepted.trace.grounding_status == "fact_rendered"
+    assert accepted.trace.rephrase_outcome is not None
+    assert accepted.trace.rephrase_outcome.startswith("rejected:")
+    assert accepted.trace.rendering_mode == "canonical_fallback"
     assert accepted.trace.generator_skipped is True
 
 
@@ -1056,8 +1095,9 @@ def test_rephraser_outage_falls_back_to_canonical_rendering(
     ).respond(message, history=[])
 
     assert "Global Payments" in fallback.answer
-    assert fallback.trace.grounding_status == "fact_rendered"
+    assert fallback.trace.grounding_status == "tool_fallback"
     assert fallback.trace.rephrase_outcome == "rephraser_unavailable"
+    assert fallback.trace.fallback_reason == "rephraser_unavailable"
     assert fallback.trace.generator_skipped is True
 
 
@@ -1073,7 +1113,7 @@ def test_no_rephraser_leaves_rephrase_outcome_none(
     ).respond(message, history=[])
 
     assert response.trace.rephrase_outcome is None
-    assert response.trace.grounding_status == "fact_rendered"
+    assert response.trace.grounding_status == "tool_fallback"
 
 
 class TruncatedGenerator:
@@ -1121,7 +1161,7 @@ def test_classifier_provider_outage_is_recorded_as_fallback_reason() -> None:
 
     response = service.respond("What security-related work has Marco done?", history=[])
 
-    assert response.trace.grounding_status == "fully_grounded"
+    assert response.trace.grounding_status == "fact_rendered"
     assert response.trace.fallback_reason == "classifier_unavailable"
 
 
@@ -1133,7 +1173,9 @@ def test_classifier_invalid_output_is_recorded_as_fallback_reason() -> None:
         generator=ToolGroundedGenerator(),
     )
 
-    response = service.respond("What security-related work has Marco done?", history=[])
+    response = service.respond(
+        "Tell me about Marco's security work in your own words.", history=[]
+    )
 
     assert response.trace.fallback_reason == "classifier_invalid_output"
 
@@ -1153,6 +1195,10 @@ def test_skills_query_in_spanish_is_rendered_deterministically_without_generatio
 
     assert generator.calls == 0
     assert response.trace.grounding_status == "list_rendered"
+    assert response.trace.answer_mode == "direct"
+    assert response.trace.rendering_mode == "canonical"
+    assert response.trace.requested_field == "skills"
+    assert response.trace.selected_fact_ids
     assert response.answer.startswith("Lenguajes y habilidades del perfil:")
     assert "Lenguajes de programación:" in response.answer
     assert profile.skills.programming_languages[0] in response.answer
@@ -1190,7 +1236,9 @@ def test_filter_experience_small_fact_set_skips_generator_with_faithful_rephrase
         rephraser=_FixedTextRephraser(rephrase_text),
     )
 
-    response = service.respond("What security-related work has Marco done?", history=[])
+    response = service.respond(
+        "Tell me about Marco's security work in your own words.", history=[]
+    )
 
     assert generator.calls == 0
     assert response.trace.grounding_status == "rephrased"
@@ -1208,7 +1256,9 @@ def test_filter_experience_small_fact_set_rejects_escalating_rephrase() -> None:
         rephraser=_FixedTextRephraser("Marco led the team that built this."),
     )
 
-    response = service.respond("What security-related work has Marco done?", history=[])
+    response = service.respond(
+        "Tell me about Marco's security work in your own words.", history=[]
+    )
 
     assert generator.calls == 0
     assert response.trace.grounding_status == "fact_rendered"
@@ -1223,8 +1273,8 @@ class _RaisingGenerator:
         raise AssertionError("generator must not be called for a deterministic summary fact set")
 
 
-def test_summary_plan_skips_the_generator_when_rephraser_is_configured() -> None:
-    """ProfileSummaryPlan.fact_ids (D-031) is now deterministic and small enough to skip generation."""
+def test_summary_plan_skips_generator_but_rejects_uncompressed_narrative_dump() -> None:
+    """A configured transformer must compress the plan, not concatenate every narrative."""
     profile = load_profile("data/profile.json")
     plan = summarize_profile(profile, SummarizeProfileArguments(audience="recruiter"))
     catalog = {fact.fact_id: fact for fact in build_resume_fact_catalog(profile)}
@@ -1240,8 +1290,12 @@ def test_summary_plan_skips_the_generator_when_rephraser_is_configured() -> None
 
     response = service.respond("Summarize Marco's experience.", history=[])
 
-    assert response.trace.grounding_status == "rephrased"
+    assert response.trace.grounding_status == "fact_rendered"
     assert response.trace.generator_skipped is True
+    assert response.trace.rendering_mode == "canonical_fallback"
+    assert response.trace.transformation_outcome.startswith("rejected:")
+    assert response.trace.final_sentence_count <= 3
+    assert response.trace.final_word_count <= 75
 
 
 def test_no_rephraser_configured_still_calls_the_generator_for_small_fact_sets() -> None:
@@ -1253,7 +1307,7 @@ def test_no_rephraser_configured_still_calls_the_generator_for_small_fact_sets()
         generator=generator,
     )
 
-    service.respond("What security-related work has Marco done?", history=[])
+    service.respond("Tell me about Marco's security work in your own words.", history=[])
 
     assert generator.calls >= 1
 
@@ -1284,8 +1338,9 @@ def test_rephraser_invalid_output_is_recorded_with_a_specific_reason_code(
         rephraser=_InvalidOutputRephraser(),
     ).respond(message, history=[])
 
-    assert fallback.trace.grounding_status == "fact_rendered"
+    assert fallback.trace.grounding_status == "tool_fallback"
     assert fallback.trace.rephrase_outcome == "rephraser_invalid_output"
+    assert fallback.trace.fallback_reason == "rephraser_invalid_output"
 
 
 def test_rephraser_truncated_output_is_recorded_with_a_specific_reason_code(
@@ -1300,8 +1355,9 @@ def test_rephraser_truncated_output_is_recorded_with_a_specific_reason_code(
         rephraser=_TruncatedRephraser(),
     ).respond(message, history=[])
 
-    assert fallback.trace.grounding_status == "fact_rendered"
+    assert fallback.trace.grounding_status == "tool_fallback"
     assert fallback.trace.rephrase_outcome == "rephraser_truncated"
+    assert fallback.trace.fallback_reason == "rephraser_truncated"
 
 
 def test_security_filter_selects_only_matched_highlight_facts_not_parent() -> None:
@@ -1317,7 +1373,9 @@ def test_security_filter_selects_only_matched_highlight_facts_not_parent() -> No
         rephraser=rephraser,
     )
 
-    response = service.respond("What security-related work has Marco done?", history=[])
+    response = service.respond(
+        "Tell me about Marco's security work in your own words.", history=[]
+    )
 
     assert response.trace.rephrase_outcome == "accepted"
     assert len(rephraser.calls) == 1
@@ -1446,7 +1504,9 @@ def test_summary_request_naming_a_profile_tag_routes_to_filter_experience() -> N
     )
 
     assert response.trace.tool_name == "filter_experience"
-    assert response.trace.claim_source_ids == [match.source_id for match in security_matches.matches]
+    assert set(response.trace.claim_source_ids) == {
+        match.source_id for match in security_matches.matches
+    }
     assert "senior engineer" not in response.answer.casefold()
 
 

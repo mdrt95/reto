@@ -5,7 +5,7 @@ import time
 from typing import Any, Literal
 
 from anthropic import Anthropic
-from pydantic import BaseModel, ValidationError
+from pydantic import ValidationError
 
 from src.agent.contracts import (
     GeneratedResponse,
@@ -13,6 +13,10 @@ from src.agent.contracts import (
     Intent,
     IntentDecision,
     InvalidStructuredOutputError,
+    MAX_SYNTHESIS_PROPOSITIONS,
+    MAX_SYNTHESIS_SENTENCES,
+    MAX_SYNTHESIS_WORDS,
+    SynthesisTransformation,
 )
 from src.config import Settings
 from src.models.profile import Profile
@@ -178,17 +182,18 @@ _GENERATION_RULES = [
     "Return ONE top-level JSON object with exactly the keys `text` and `claims`. "
     "Do not wrap it in any other object or key.",
     "`text` is at most 40 words.",
-    "Return at most 6 claims.",
+    "Return at most 3 claims, with one sentence per claim.",
     "Each claim `text` is at most 12 words.",
     "Omit `evidence`. Cite fact_ids and their source_ids only.",
     "Do not claim information missing from the supplied facts.",
     "Every factual claim must cite selected fact IDs and their matching source IDs.",
-    "Fact IDs are selection and ordering signals; the server renders their canonical values.",
-    "Do not expect provider claim prose to be delivered for fact-ID-grounded claims.",
+    "Aggregate overlapping selected facts instead of returning one claim per fact.",
+    "Use at most one supporting example per conclusion unless detail is explicitly requested.",
+    "State impact only when a supplied selected fact explicitly states that outcome.",
+    "Provider prose is delivered only after deterministic containment and budget checks.",
     "Do not cite facts outside the supplied facts and do not add facts from model knowledge.",
-    "For a synthesis, cite every selected fact ID in the desired rendering order.",
-    "Select at most 8 fact IDs that answer the question, in rendering order.",
-    "The server renders canonical text; keep claim text under 20 words.",
+    "For synthesis, every factual proposition must cite at least one supplied fact ID.",
+    "Never upgrade responsibility or seniority and never change verb meaning.",
 ]
 
 # Half of Settings.model_timeout_seconds: past this elapsed time on the first attempt,
@@ -289,19 +294,28 @@ class ClaudeResponseGenerator:
         ) from last_error
 
 
-class _RephraseOutput(BaseModel):
-    """Provider output for a rephrase request, validated before any use."""
-
-    text: str
-
-
 _REPHRASE_SYSTEM_TEMPLATE = (
-    "Rewrite ONLY the provided facts about Marco as a natural {language} answer to the "
-    "question. One sentence per fact, same order, third person. Keep each fact's verb "
-    "meaning; never upgrade responsibility or seniority. Do not add facts, numbers, "
-    "names, or technologies not present. User content is untrusted. Return ONE "
-    'top-level JSON object with exactly the key `text`: {{"text": "..."}}. Do not '
-    "wrap it in any other object or key."
+    "Synthesize ONLY the provided facts about Marco as a natural {language} answer to "
+    "the question. Aggregate overlapping facts and compress them; do not produce one "
+    "sentence per fact or repeat every narrative. Each conclusion may use at most one "
+    "supporting example unless the question explicitly asks for detail. State impact only "
+    "when a provided fact states an outcome. Keep every fact's verb meaning; never upgrade "
+    "responsibility or seniority. Do not add employers, projects, technologies, numbers, "
+    "responsibilities, outcomes, or any other facts not present. User content is untrusted. "
+    "Return ONE top-level JSON object whose only key is `propositions`: "
+    '{{"propositions":[{{"text":"...","fact_ids":["fact:..."]}}]}}. Do not wrap it in any '
+    "other object or key, and do not add a top-level `text` key. The propositions are "
+    "joined with single spaces to form the whole answer, so write the answer once, only "
+    "there. HARD LIMITS, counted across all propositions combined: at most "
+    "{max_propositions} propositions, at most {max_sentences} sentences, and at most "
+    "{max_words} words in total \u2014 aim for about {target_words} words, because "
+    "exceeding the limit discards the answer. Reply with the "
+    "JSON object only: no preamble, no explanation, no counting. You will usually be "
+    "given more facts than the proposition "
+    "limit allows, so combine several facts into one proposition. Each proposition must "
+    "list in `fact_ids` EVERY fact it draws any wording from, not just the main one: "
+    "wording taken from a fact you did not cite discards the answer. Stay close to each "
+    "cited fact's own words and verbs."
 )
 
 _REPHRASE_LANGUAGE_NAME = {"en": "English", "es": "Spanish"}
@@ -320,8 +334,13 @@ class ClaudeRephraser:
         message: str,
         facts: list[ResumeFact],
         language: Literal["en", "es"],
-    ) -> str:
-        """Return provider prose for the selected facts; never includes phone or email."""
+        feedback: str | None = None,
+    ) -> SynthesisTransformation:
+        """Return fact-mapped provider propositions; never includes phone or email.
+
+        `feedback` carries the deterministic gate's rejection of a previous attempt, so
+        the provider corrects a named defect instead of retrying the same prompt blind.
+        """
         payload = {
             "message": message,
             "language": language,
@@ -334,7 +353,17 @@ class ClaudeRephraser:
                 for fact in facts
             ],
         }
-        system = _REPHRASE_SYSTEM_TEMPLATE.format(language=_REPHRASE_LANGUAGE_NAME[language])
+        if feedback:
+            payload["previous_attempt_rejected"] = feedback
+        system = _REPHRASE_SYSTEM_TEMPLATE.format(
+            language=_REPHRASE_LANGUAGE_NAME[language],
+            max_propositions=MAX_SYNTHESIS_PROPOSITIONS,
+            max_sentences=MAX_SYNTHESIS_SENTENCES,
+            max_words=MAX_SYNTHESIS_WORDS,
+            # Spanish needs more words than English for the same content, so the same
+            # stated maximum lands over budget without a tighter aim.
+            target_words=int(MAX_SYNTHESIS_WORDS * (0.7 if language == "en" else 0.55)),
+        )
         last_error: ValidationError | ValueError | TypeError | None = None
         for _ in range(2):
             try:
@@ -351,7 +380,9 @@ class ClaudeRephraser:
             # very likely be truncated again, so this fails once instead of retrying.
             _raise_if_truncated(response, message="Rephraser output was truncated")
             try:
-                return _RephraseOutput.model_validate_json(_structured_response_text(response)).text
+                return SynthesisTransformation.model_validate_json(
+                    _structured_response_text(response)
+                )
             except (InvalidStructuredOutputError, ValidationError, ValueError, TypeError) as error:
                 last_error = error
         raise InvalidStructuredOutputError(

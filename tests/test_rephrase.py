@@ -2,7 +2,7 @@
 
 import pytest
 
-from src.agent.rephrase import verify_rephrase
+from src.agent.rephrase import verify_rephrase, verify_synthesis_text
 from src.models.profile import load_profile
 from src.tools.profile_tools import ResumeFact, build_resume_fact_catalog
 
@@ -195,3 +195,138 @@ def test_numbers_with_thousand_separators_match_profile_vocabulary() -> None:
     verdict = verify_rephrase(text=text, selected_facts=selected, catalog=catalog, language="en")
 
     assert verdict.code == "accepted", verdict.details
+
+
+def test_a_verb_the_cited_fact_itself_uses_is_not_drift(catalog: list[ResumeFact]) -> None:
+    """The fact's leading verb is not the only verb it authorizes.
+
+    `hl-isv-module` reads "Collaborated in delivering ... Built an internal multi-agent
+    engineering workflow". Rejecting "built" rejects the fact's own wording.
+    """
+    isv_module = _fact(catalog, "experience:exp-global-payments.highlight:hl-isv-module")
+
+    verdict = verify_rephrase(
+        text=(
+            "Marco collaborated in delivering a new ISV module, beating deadline "
+            "expectations, by building an internal multi-agent engineering workflow."
+        ),
+        selected_facts=[isv_module],
+        catalog=catalog,
+        language="en",
+        require_each_fact_verb=False,
+    )
+
+    assert verdict.allowed, verdict.details
+
+
+def test_synthesis_admits_inflections_of_authorized_words(catalog: list[ResumeFact]) -> None:
+    """Compression rewrites grammar; "implemented" becoming "implementing" adds no fact."""
+    performance = _fact(catalog, "experience:exp-global-payments.highlight:hl-performance")
+
+    verdict = verify_synthesis_text(
+        text=(
+            "Marco resolved availability-affecting performance bottlenecks by "
+            "implementing Redis and SQL caching per Global Payments requirements."
+        ),
+        selected_facts=[performance],
+        catalog=catalog,
+        language="en",
+        dimension="summary",
+    )
+
+    assert verdict.allowed, verdict.details
+
+
+def test_synthesis_still_rejects_a_word_absent_from_the_selection(
+    catalog: list[ResumeFact],
+) -> None:
+    """Inflection tolerance must not become an opening for unrelated content."""
+    performance = _fact(catalog, "experience:exp-global-payments.highlight:hl-performance")
+
+    verdict = verify_synthesis_text(
+        text="Marco implemented caching, delighting every enterprise stakeholder.",
+        selected_facts=[performance],
+        catalog=catalog,
+        language="en",
+        dimension="summary",
+    )
+
+    assert not verdict.allowed
+    assert verdict.code == "unsupported_vocabulary"
+
+
+def test_a_possessive_s_is_tokenization_residue_not_a_claim(
+    catalog: list[ResumeFact],
+) -> None:
+    """`normalize_resume_text` splits "Marco's" into "marco" + "s"."""
+    sybil = _fact(catalog, "project:proj-sybil")
+
+    verdict = verify_synthesis_text(
+        text="Sybil is Marco's Retrieval-Augmented Generation system.",
+        selected_facts=[sybil],
+        catalog=catalog,
+        language="en",
+        dimension="summary",
+    )
+
+    assert verdict.allowed, verdict.details
+
+
+def test_a_proposition_may_use_wording_from_elsewhere_in_the_same_selection(
+    catalog: list[ResumeFact],
+) -> None:
+    """Vocabulary is bounded by the turn's selection; attribution stays per proposition.
+
+    Compression draws connective wording across the facts it aggregates. Entity
+    leakage, verb drift, escalation, and invented outcomes remain checked against
+    the facts the proposition actually cites.
+    """
+    sybil = _fact(catalog, "project:proj-sybil")
+    hybrid = _fact(catalog, "project:proj-sybil.highlight:sybil-hl-hybrid")
+
+    verdict = verify_synthesis_text(
+        text="Sybil merges semantic vector search with full-text search.",
+        selected_facts=[sybil],
+        vocabulary_facts=[sybil, hybrid],
+        catalog=catalog,
+        language="en",
+        dimension="summary",
+    )
+
+    assert verdict.allowed, verdict.details
+
+
+def test_wording_outside_the_selection_is_still_rejected(catalog: list[ResumeFact]) -> None:
+    """Widening to the selection is not widening to the whole profile."""
+    sybil = _fact(catalog, "project:proj-sybil")
+
+    verdict = verify_synthesis_text(
+        text="Sybil supports merchant onboarding for point-of-sale devices.",
+        selected_facts=[sybil],
+        vocabulary_facts=[sybil],
+        catalog=catalog,
+        language="en",
+        dimension="summary",
+    )
+
+    assert not verdict.allowed
+
+
+def test_a_spanish_irregular_preterite_matches_its_own_verb(
+    catalog: list[ResumeFact],
+) -> None:
+    """`reducir` conjugates as "reduciendo" and "redujo": the letters differ, the verb does not."""
+    reusable_apis = _fact(catalog, "experience:exp-global-payments.highlight:hl-reusable-apis")
+
+    verdict = verify_synthesis_text(
+        text=(
+            "Marco construyó endpoints de API reutilizables y desacoplados, lo que "
+            "redujo la sobrecarga de integración."
+        ),
+        selected_facts=[reusable_apis],
+        catalog=catalog,
+        language="es",
+        dimension="impact",
+    )
+
+    assert verdict.allowed, verdict.details
