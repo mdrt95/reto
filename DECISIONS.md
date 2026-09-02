@@ -437,3 +437,46 @@ requires three such propositions and remains unreachable at either limit.
 Live provider gate after this change: all five required Issue #1 examples render
 deterministically, and all five required Issue #2 examples deliver transformed
 synthesis within the 3-sentence/75-word budget in both languages.
+
+## D-037: Make the scenario matrix the enforceable answer contract
+
+**Status:** Accepted (supersedes the evaluation behavior of D-029 and D-030)
+
+`eval/scenarios.json` becomes the single source of truth for automated evaluation and
+the manual UI checklist, and `eval/run_eval.py` enforces every field it declares.
+
+Previously the runner treated `expected_source_ids` as a subset, so an answer that
+selected the right facts plus unrelated extras passed; `tool_required` proved only that
+some tool ran, not the right one on the right topic; and `inference_permitted` was
+parsed and never checked. Scope is now exact in both directions, tool checks assert the
+named tool, and inference policy is enforced through `rendering_mode`.
+
+Enforcing inference through the rendering mode rather than a claim-kind count reflects
+what the answer plan actually made true. After D-033 and D-034 every delivered answer is
+either reconstructed from canonical facts (`canonical`, `canonical_fallback`,
+`canonical_not_found`, `clarification`) or a contained transformation of a selected fact
+set (`transformed`). The legacy free-generation path that D-029 and D-030 were written
+around is no longer reachable through `respond`: `"generated"` appears at one production
+site and in no test, and no route produces it. Only `transformed` carries wording the
+provider chose, so it is the only mode an inference can reach. A guardrail block or
+out-of-scope redirect never reaches the answer plan and therefore has no rendering mode.
+
+Provider failure is reproduced by substituting a failing stage rather than waiting for a
+real outage, and provider calls are counted through wrapped stages, so "a direct answer
+makes zero generation calls" is verified rather than assumed. Both are deterministic and
+run without network access.
+
+**Why:** Automated evaluation passed while the live UI produced broader answers, verbose
+concatenations, and provider-related failures. A subset check cannot catch an extra fact,
+and a boolean that is read but never compared cannot catch anything. The matrix is only
+evidence if the checker can fail, so `tests/test_eval_contract.py` feeds it responses
+that violate one expectation each and asserts the violation is reported.
+
+**Consequence:** The matrix fixes thirty scenarios: ten paired English/Spanish
+behaviors, five incompatible classifier doubles, and the five retained guardrail cases.
+Parity is asserted as prefix equivalence per D-036, not set equality. Building the matrix
+surfaced one live defect: Spanish summary recognition keyed on the fixed phrase
+`"resume la"`, so "Resume los proyectos de Marco" was not routed to synthesis at all and
+selected five unrelated experience and education facts. Spanish now matches the bare
+imperative verb, gated on detected language so the English noun "resume" never triggers
+it. The full matrix passes against the configured provider.

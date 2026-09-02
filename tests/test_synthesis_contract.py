@@ -700,3 +700,42 @@ def test_a_rejected_transformation_earns_one_corrective_attempt() -> None:
     assert transformer.feedback[1]
     assert response.trace.rendering_mode == "transformed"
     assert response.trace.transformation_outcome == "accepted_after_correction"
+
+
+@pytest.mark.parametrize(
+    ("message", "topic"),
+    [
+        ("Resume la experiencia de Marco.", "experience"),
+        ("Resume los proyectos de Marco.", "projects"),
+        ("Resume sus proyectos.", "projects"),
+        ("Resúmeme la experiencia de Marco.", "experience"),
+    ],
+)
+def test_spanish_summary_requests_are_recognized_beyond_one_fixed_phrase(
+    message: str,
+    topic: str,
+) -> None:
+    """"Resume" is a Spanish imperative verb; its object is not always "la experiencia"."""
+    profile = load_profile("data/profile.json")
+    planner = AnswerPlanner(profile)
+
+    plan = planner.plan_from_tool(
+        message,
+        summarize_profile(profile, SummarizeProfileArguments(audience="recruiter")),
+    )
+
+    assert plan.synthesis_dimension == "summary"
+    assert plan.topic == topic
+
+
+def test_an_english_resume_noun_is_not_a_summary_request() -> None:
+    """The same letters are a noun in English and must not trigger transformation."""
+    profile = load_profile("data/profile.json")
+    planner = AnswerPlanner(profile)
+
+    plan = planner.plan_from_tool(
+        "What does Marco's resume say about FAISS?",
+        summarize_profile(profile, SummarizeProfileArguments(audience="recruiter")),
+    )
+
+    assert plan.synthesis_dimension is None
