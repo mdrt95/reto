@@ -3,6 +3,7 @@
 import json
 import logging
 import re
+import unicodedata
 from typing import Literal, Protocol, get_args
 
 from src.agent.answer_planning import (
@@ -123,6 +124,47 @@ _SUMMARY_FIELD_MARKERS: dict[str, tuple[str, ...]] = {
     "languages": ("idioma", "language"),
     "education": ("educa", "estudios", "degree"),
 }
+
+_GREETING_TERMS = frozenset({"hi", "hello", "hey", "hola"})
+"""Words that, alone, make a turn a social greeting rather than a profile request."""
+
+_SPANISH_GREETING_TERMS = frozenset({"hola"})
+"""Greeting words that fix the reply language to Spanish."""
+
+_GREETING_FILLER = frozenset({"there"})
+"""Words allowed alongside a greeting term without making the turn a real question."""
+
+_GREETING_ANSWERS = {
+    "en": (
+        "Hi! I can answer questions about Marco's professional profile — his "
+        "experience, skills, and projects. What would you like to know?"
+    ),
+    "es": (
+        "¡Hola! Puedo responder preguntas sobre el perfil profesional de Marco: su "
+        "experiencia, habilidades y proyectos. ¿Qué te gustaría saber?"
+    ),
+}
+
+
+def _greeting_reply_language(message: str) -> Literal["en", "es"] | None:
+    """Return the reply language when the whole turn is a bare greeting, else None.
+
+    Case, punctuation, and repetition are folded away first, so `Hi!`, `HELLO`, and
+    `hey there` all qualify. Any token that is not a greeting term or permitted filler
+    means the turn carries a real request (`Hi, what does Marco do?`), which must fall
+    through to normal routing untouched. A Spanish greeting word picks the Spanish
+    reply; `detect_response_language` cannot, because a lone `hola` carries no other
+    Spanish signal.
+    """
+    folded = unicodedata.normalize("NFKD", message.casefold())
+    ascii_message = "".join(ch for ch in folded if not unicodedata.combining(ch))
+    tokens = re.findall(r"[a-z]+", ascii_message)
+    if not tokens or not set(tokens) <= (_GREETING_TERMS | _GREETING_FILLER):
+        return None
+    if not any(token in _GREETING_TERMS for token in tokens):
+        return None
+    return "es" if any(token in _SPANISH_GREETING_TERMS for token in tokens) else "en"
+
 
 _GENERATION_LOGGER = logging.getLogger("banorte_cv_agent.generation")
 
@@ -468,6 +510,10 @@ class AgentService:
                 answer=input_result.message,
                 trace=AgentTrace(guardrail_input="blocked"),
             )
+
+        greeting_language = _greeting_reply_language(message)
+        if greeting_language is not None:
+            return self._greeting_response(greeting_language, state)
 
         if self._referent_verdict(message, state) == "absent":
             return self._negative_referent_response(message, state)
@@ -1795,6 +1841,28 @@ class AgentService:
         lines = [headings[result.language][result.topic]]
         lines.extend(f"- {fact_display_text(match, result.language)}" for match in result.matches)
         return "\n".join(lines)
+
+    def _greeting_response(
+        self,
+        language: Literal["en", "es"],
+        state: ConversationState | None,
+    ) -> AgentResponse:
+        """Answer a bare greeting deterministically, ahead of any classifier or provider.
+
+        No fact is selected and the discourse record is passed straight through, so a
+        greeting is transparent to `tell me more` on whatever preceded it.
+        """
+        return AgentResponse(
+            answer=_GREETING_ANSWERS[language],
+            trace=AgentTrace(
+                intent="greeting",
+                intent_confidence=1.0,
+                grounding_status="greeting",
+                generator_skipped=True,
+                selection_path="none",
+            ),
+            state=state,
+        )
 
     def _unclassified_response(
         self,
