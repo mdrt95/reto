@@ -338,6 +338,28 @@ def test_expired_previous_response_id_fails_closed(make_client: ClientFactory) -
     assert len(agent.calls) == 1
 
 
+def test_streaming_request_rejects_a_bad_previous_response_id_as_plain_json(
+    make_client: ClientFactory,
+) -> None:
+    agent = RecordingAgent()
+    client = make_client(agent)
+
+    response = client.post(
+        "/v1/responses",
+        headers=AUTH,
+        json={
+            "input": "follow up",
+            "previous_response_id": "resp_missing",
+            "stream": True,
+        },
+    )
+
+    assert response.status_code == 404
+    assert response.headers["content-type"].startswith("application/json")
+    assert response.json()["error"]["code"] == "previous_response_not_found"
+    assert agent.calls == []
+
+
 def test_previous_response_id_and_resent_input_combine_state_and_history(
     make_client: ClientFactory,
 ) -> None:

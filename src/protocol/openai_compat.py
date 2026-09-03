@@ -300,9 +300,12 @@ def _log_error(response_id: str, code: str) -> None:
 def create_response(payload: ResponsesRequest, request: Request) -> JSONResponse | StreamingResponse:
     """Answer one OpenAI Responses request by delegating to the core agent service.
 
-    Every fallible step — auth, size limits, rate limit, and the core call — runs
-    to completion before a streaming response is chosen, so a rejected request is
-    always a plain JSON error and never a truncated event stream.
+    Every fallible step — auth, size limits, rate limit, ``previous_response_id``
+    resolution, and the core call — runs to completion before a streaming
+    response is chosen, so a rejected request is always a plain JSON error and
+    never a truncated event stream. A resolved snapshot reaches the core service
+    as ``state``, on the same untrusted footing as ``message`` and ``history``;
+    the JSON and SSE paths then frame one identical verified answer.
     """
     response_id = f"resp_{uuid4().hex}"
     started_at = monotonic()
