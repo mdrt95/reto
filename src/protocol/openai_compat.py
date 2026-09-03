@@ -6,9 +6,16 @@ clients. It translates the OpenAI Responses wire contract to and from the same
 tool, guardrail, or grounding behavior changes here: the adapter only re-shapes
 the HTTP boundary and enforces the same request limits and per-client rate limit.
 
-Trust boundary: client-supplied ``instructions``, ``previous_response_id``,
-sampling parameters, and tool declarations are accepted and ignored. Only the
-message text and prior user/assistant turns in ``input`` reach the core service.
+Trust boundary: client-supplied ``instructions``, sampling parameters, and tool
+declarations are accepted and ignored. The message text and prior user/assistant
+turns in ``input`` reach the core service as untrusted data.
+
+Continuity (issue #27): ``previous_response_id`` is resolved through a bounded,
+process-local store that maps the opaque ``resp_*`` ID to the compact verified
+``ConversationState`` the core agent produced on that turn — catalog IDs and enum
+values only, never message or answer text. An ID that is unknown, expired, or
+malformed fails closed with a machine-readable ``previous_response_not_found``
+error and no provider call; the client may then resend history in ``input``.
 
 Streaming (``stream: true``) returns a ``text/event-stream`` of Responses API
 events, but the answer is produced and fully grounding-verified before the first
@@ -29,8 +36,9 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict
 
 from src.agent.claude import GenerationUnavailableError
-from src.agent.contracts import AgentResponse
+from src.agent.contracts import AgentResponse, ConversationState
 from src.observability.logger import TurnLogEvent, log_turn
+from src.protocol.response_store import ResponseStateStore
 
 router = APIRouter(tags=["openai-compat"])
 
@@ -71,6 +79,7 @@ class ResponsesRequest(BaseModel):
     model: str | None = None
     input: str | list[_InputMessage] | None = None
     stream: bool | None = None
+    previous_response_id: str | None = None
 
 
 class _OpenAIError(Exception):
@@ -98,6 +107,13 @@ class _Unauthorized(_OpenAIError):
     err_type = "invalid_request_error"
     code = "invalid_api_key"
     message = "Incorrect API key provided."
+
+
+class _UnknownPreviousResponse(_OpenAIError):
+    status = 404
+    err_type = "invalid_request_error"
+    code = "previous_response_not_found"
+    message = "Previous response not found or expired. Resend prior turns in 'input'."
 
 
 class _NotConfigured(_OpenAIError):
@@ -203,6 +219,26 @@ def _client_host(request: Request) -> str:
     return request.client.host if request.client else "unknown"
 
 
+def _resolve_prior_state(
+    payload: ResponsesRequest, request: Request
+) -> ConversationState | None:
+    """Turn ``previous_response_id`` into stored verified state, or fail closed.
+
+    A blank or absent ID is a fresh turn. Any non-empty ID that the bounded store
+    cannot resolve — unknown, expired, or malformed — is a
+    ``previous_response_not_found`` error raised before the core service is called.
+    The client-supplied ID is never logged or echoed.
+    """
+    previous_id = (payload.previous_response_id or "").strip()
+    if not previous_id:
+        return None
+    store: ResponseStateStore = request.app.state.responses_state_store
+    prior_state = store.get(previous_id)
+    if prior_state is None:
+        raise _UnknownPreviousResponse()
+    return prior_state
+
+
 def _log_completed(response_id: str, result: AgentResponse, latency_ms: int, model_name: str) -> None:
     trace = result.trace
     log_turn(
@@ -261,7 +297,12 @@ def create_response(payload: ResponsesRequest, request: Request) -> JSONResponse
         ):
             raise _RateLimited()
 
-        result: AgentResponse = request.app.state.agent_service.respond(message, history=history)
+        prior_state = _resolve_prior_state(payload, request)
+        agent_service = request.app.state.agent_service
+        if prior_state is None:
+            result: AgentResponse = agent_service.respond(message, history=history)
+        else:
+            result = agent_service.respond(message, history=history, state=prior_state)
     except _OpenAIError as error:
         _log_error(response_id, error.code or error.err_type)
         return _error_response(error)
@@ -285,6 +326,9 @@ def create_response(payload: ResponsesRequest, request: Request) -> JSONResponse
     model_name = payload.model or MODEL_ID
     latency_ms = round((monotonic() - started_at) * 1_000)
     _log_completed(response_id, result, latency_ms, model_name)
+
+    if result.state is not None:
+        request.app.state.responses_state_store.put(response_id, result.state)
 
     created_at = int(time())
     message_id = f"msg_{uuid4().hex}"

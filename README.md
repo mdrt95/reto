@@ -31,7 +31,7 @@ request validation → input/privacy guard → unknown-entity check
 
 `data/profile.json` is the sole runtime source of biographical claims. Pydantic validates it at startup, then the application derives its fact catalog and normalized search index in memory. Tools are typed, allowlisted, read-only, and bounded; neither the model nor the HTTP client chooses arbitrary code or data access.
 
-Conversation data is client-owned and ephemeral. The service stores no transcript database. `/api/chat` accepts a bounded transcript plus compact verified state; `/v1/responses` derives history only from message items resent in the current request. Logs contain correlation and decision metadata, not prompts, answers, provider payloads, API keys, email addresses, or phone numbers.
+Conversation data is client-owned and ephemeral. The service stores no transcript database. `/api/chat` accepts a bounded transcript plus compact verified state; `/v1/responses` takes history from message items resent in the current request and, for `previous_response_id`, resolves compact verified state from a bounded, TTL-limited, process-local snapshot that holds catalog IDs and enum values only — no message or answer text. Logs contain correlation and decision metadata, not prompts, answers, provider payloads, API keys, email addresses, or phone numbers.
 
 There is intentionally no vector database, embedding pipeline, document chunking, durable memory, write-capable tool, A2A endpoint, MCP server, or Chat Completions endpoint.
 
@@ -76,6 +76,8 @@ Then open [http://127.0.0.1:8000](http://127.0.0.1:8000). Never commit `.env` or
 | `MAX_INPUT_CHARS` | `12000` | Maximum current message and maximum aggregate history characters |
 | `MAX_HISTORY_MESSAGES` | `12` | Maximum prior user/assistant message items |
 | `RATE_LIMIT_PER_MINUTE` | `30` | Rolling in-memory limit per client IP, shared by both chat routes |
+| `RESPONSES_STATE_TTL_SECONDS` | `1800` | Lifetime of a `/v1/responses` `previous_response_id` state snapshot |
+| `RESPONSES_STATE_MAX_ENTRIES` | `1000` | Cap on live snapshots; overflow evicts the oldest |
 | `REPHRASE_ENABLED` | `true` | Allows verified model rephrasing; `false` forces canonical rendering |
 | `ENVIRONMENT` | `development` | Set to `production` for deployed configuration validation |
 | `LOG_LEVEL` | `INFO` | Application log level |
@@ -157,9 +159,31 @@ Or it may be an array whose final usable message is a `user` turn:
 }
 ```
 
-Earlier `user` and `assistant` messages become bounded history. Text content parts are joined; non-text parts, non-message items, and `system`/`developer` messages are ignored. The adapter also accepts but ignores `instructions`, `previous_response_id`, sampling parameters, client tool declarations, and other unknown fields. These fields cannot modify server-owned behavior.
+Earlier `user` and `assistant` messages become bounded history. Text content parts are joined; non-text parts, non-message items, and `system`/`developer` messages are ignored. The adapter also accepts but ignores `instructions`, sampling parameters, client tool declarations, and other unknown fields. These fields cannot modify server-owned behavior.
 
-IMPORTANT: `previous_response_id` does not restore context. There is no response store behind the generated `resp_*` IDs. A multi-turn OpenAI-style client must resend prior user/assistant message items in `input` on every request.
+#### Continuing a conversation with `previous_response_id`
+
+Send the `resp_*` ID from a prior turn to continue it without resending history:
+
+```json
+{
+  "input": "And his role there?",
+  "previous_response_id": "resp_<uuid-from-a-previous-turn>"
+}
+```
+
+The adapter resolves the ID against a bounded, process-local store that maps it to the compact verified `ConversationState` the core agent produced on that turn. That snapshot holds only verified referents — topic, source and entity IDs, focus, delivered-fact IDs, response language — matching the `state` object `/api/chat` returns. It never holds message or answer text and is not a transcript database. Snapshots expire after `RESPONSES_STATE_TTL_SECONDS`, the store is capped at `RESPONSES_STATE_MAX_ENTRIES` (oldest evicted first), and all snapshots are lost on process restart.
+
+Resolution is untrusted like every other client input: guardrails, grounding, privacy checks, size limits, and the rate limiter all still run. You may also resend `user`/`assistant` items in `input` alongside `previous_response_id`; the resent items form the turn's bounded history and the snapshot supplies the verified referents.
+
+An ID that is unknown, expired, or malformed fails closed with HTTP `404` and no provider call:
+
+```json
+{ "error": { "message": "Previous response not found or expired. Resend prior turns in 'input'.",
+             "type": "invalid_request_error", "param": null, "code": "previous_response_not_found" } }
+```
+
+A client that cannot retain the `resp_*` ID, or that targets a different instance or a restarted process, should fall back to resending prior `user`/`assistant` message items in `input`.
 
 A non-streaming success returns a Responses-shaped object with one assistant `output_text` message and a duplicate top-level `output_text`. The echoed `model` is the client-supplied string, or `banorte-cv-agent` when omitted. `usage` currently reports zeros because provider token accounting is not exposed through this adapter.
 
@@ -184,7 +208,7 @@ A non-streaming success returns a Responses-shaped object with one assistant `ou
 }
 ```
 
-Semantic input errors return `400`, invalid/missing bearer tokens return `401`, the disabled adapter or unavailable answer generation returns `503`, and rate limiting returns `429`. Adapter-handled failures use the OpenAI-style `{"error": {...}}` JSON envelope. FastAPI/Pydantic parsing failures still use the application's sanitized `422 application/problem+json` boundary.
+Semantic input errors return `400`, an unresolvable `previous_response_id` returns `404` with code `previous_response_not_found`, invalid/missing bearer tokens return `401`, the disabled adapter or unavailable answer generation returns `503`, and rate limiting returns `429`. Adapter-handled failures use the OpenAI-style `{"error": {...}}` JSON envelope. FastAPI/Pydantic parsing failures still use the application's sanitized `422 application/problem+json` boundary.
 
 #### Streaming
 
@@ -253,16 +277,16 @@ LOG_LEVEL=INFO
 
 Add `OPENAI_COMPAT_TOKEN=<different-secret>` only when an external client needs the Responses adapter. Configure `/health` as the HTTPS readiness check.
 
-The image defaults `FORWARDED_ALLOW_IPS=*` because the documented Render topology places exactly one trusted platform proxy in front of the container. Reassess that setting before deploying behind a different proxy topology; otherwise forwarded client addresses may be spoofable. Rate limiting is process-local and shared across `/api/chat` and `/v1/responses` per client IP. Counters reset on restart and are not coordinated across multiple instances.
+The image defaults `FORWARDED_ALLOW_IPS=*` because the documented Render topology places exactly one trusted platform proxy in front of the container. Reassess that setting before deploying behind a different proxy topology; otherwise forwarded client addresses may be spoofable. Rate limiting is process-local and shared across `/api/chat` and `/v1/responses` per client IP. Counters reset on restart and are not coordinated across multiple instances. The `/v1/responses` `previous_response_id` snapshot store is process-local on the same terms: a snapshot does not resolve after a restart or on a different instance, and the client falls back to resending history.
 
 ## Honest limitations
 
 - OpenAI compatibility is intentionally limited to `POST /v1/responses`, its documented JSON/SSE subset, and `GET /v1/models`; it is not a complete OpenAI API implementation.
-- `previous_response_id`, client instructions, sampling options, and client-declared tools are ignored.
+- Client instructions, sampling options, and client-declared tools are ignored. `previous_response_id` is honored but resolves only against a bounded, process-local, TTL-limited snapshot of verified state — never a stored transcript — and never across a restart or a second instance.
 - SSE deltas are produced only after full answer verification.
 - `/api/chat` has no authentication; deployment protection depends on narrow functionality, privacy controls, input limits, and the in-memory rate limiter.
 - No CORS middleware is configured. The built-in same-origin UI works, but a browser client on another origin requires an explicitly allowlisted CORS change.
-- No persistent session, distributed rate limiter, shared response store, or multi-instance coordination exists.
+- No persistent session, distributed rate limiter, cross-instance response store, or multi-instance coordination exists; the `previous_response_id` snapshot store is single-process only.
 - Deterministic fallback coverage is intentionally bounded; some provider outages return a sanitized `503`.
 - Profile changes require a factual review and validation because `data/profile.json` is production truth.
 

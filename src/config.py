@@ -22,6 +22,8 @@ class Settings(BaseSettings):
     max_input_chars: int = Field(default=12_000, gt=0)
     max_history_messages: int = Field(default=12, ge=0)
     rate_limit_per_minute: int = Field(default=30, gt=0)
+    responses_state_ttl_seconds: int = Field(default=1_800, gt=0)
+    responses_state_max_entries: int = Field(default=1_000, gt=0)
     rephrase_enabled: bool = True
     environment: str = "development"
     log_level: str = "INFO"

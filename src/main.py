@@ -16,11 +16,17 @@ from src.api.chat import InMemoryRateLimiter, ProblemDetails, PublicProblem, rou
 from src.api.health import router as health_router
 from src.config import Settings
 from src.protocol.openai_compat import router as openai_compat_router
+from src.protocol.response_store import ResponseStateStore
 from src.models.profile import load_profile
 from src.observability.logger import TurnLogEvent, configure_logging, log_turn
 
 
-def create_app(settings: Settings | None = None, *, agent_service: Any | None = None) -> FastAPI:
+def create_app(
+    settings: Settings | None = None,
+    *,
+    agent_service: Any | None = None,
+    responses_state_store: ResponseStateStore | None = None,
+) -> FastAPI:
     """Create the HTTP service and validate its approved profile during startup."""
     runtime_settings = settings or Settings()
     configure_logging(runtime_settings.log_level)
@@ -40,6 +46,14 @@ def create_app(settings: Settings | None = None, *, agent_service: Any | None = 
     application = FastAPI(title="Banorte CV Agent", version="0.1.0", lifespan=lifespan)
     application.state.settings = runtime_settings
     application.state.rate_limiter = InMemoryRateLimiter()
+    application.state.responses_state_store = (
+        responses_state_store
+        if responses_state_store is not None
+        else ResponseStateStore(
+            ttl_seconds=runtime_settings.responses_state_ttl_seconds,
+            max_entries=runtime_settings.responses_state_max_entries,
+        )
+    )
     application.include_router(health_router)
     application.include_router(chat_router)
     application.include_router(openai_compat_router)
