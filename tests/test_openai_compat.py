@@ -412,6 +412,93 @@ def test_streaming_follow_up_uses_the_stored_state(make_client: ClientFactory) -
     assert agent.calls[1]["state"] == returned
 
 
+def test_json_and_sse_continuations_yield_the_same_grounded_text(
+    make_client: ClientFactory,
+) -> None:
+    returned = ConversationState(last_topic="experience", response_language="en")
+    answer = "He was a senior engineer at Google from 2019 to 2023."
+    agent = RecordingAgent(answer, state=returned)
+    client = make_client(agent)
+    resp_id = _first_turn_response_id(client, "Where did Marco work?")
+
+    body = {"input": "And his role there?", "previous_response_id": resp_id}
+    json_reply = client.post("/v1/responses", headers=AUTH, json=body)
+    sse_reply = client.post("/v1/responses", headers=AUTH, json={**body, "stream": True})
+
+    assert json_reply.status_code == 200
+    assert sse_reply.status_code == 200
+
+    json_text = json_reply.json()["output_text"]
+    events = _parse_sse(sse_reply.text)
+    sse_text = "".join(
+        data["delta"]
+        for event_type, data in events
+        if event_type == "response.output_text.delta"
+    )
+    completed = next(
+        data for event_type, data in events if event_type == "response.completed"
+    )
+
+    assert json_text == answer
+    assert sse_text == answer
+    assert completed["response"]["output_text"] == answer
+    assert agent.calls[1]["state"] == returned
+    assert agent.calls[2]["state"] == returned
+
+
+def test_a_successful_continuation_logs_no_prompt_answer_or_client_id(
+    make_client: ClientFactory,
+) -> None:
+    events: list[object] = []
+    import src.protocol.openai_compat as adapter
+
+    returned = ConversationState(last_topic="experience", response_language="en")
+    original = adapter.log_turn
+    adapter.log_turn = events.append  # type: ignore[assignment]
+    try:
+        client = make_client(RecordingAgent("ANSWER_SECRET_TOKEN", state=returned))
+        resp_id = _first_turn_response_id(client, "opening question")
+        events.clear()
+        follow_up = client.post(
+            "/v1/responses",
+            headers=AUTH,
+            json={"input": "QUESTION_SECRET_TOKEN", "previous_response_id": resp_id},
+        )
+    finally:
+        adapter.log_turn = original  # type: ignore[assignment]
+
+    assert follow_up.status_code == 200
+    assert len(events) == 1
+    serialized = json.dumps(getattr(events[0], "__dict__", {}), default=str)
+    assert "QUESTION_SECRET_TOKEN" not in serialized
+    assert "ANSWER_SECRET_TOKEN" not in serialized
+    assert resp_id not in serialized
+
+
+def test_a_snapshot_does_not_survive_a_simulated_process_restart(
+    make_client: ClientFactory,
+) -> None:
+    returned = ConversationState(last_topic="projects", response_language="en")
+    agent = RecordingAgent(state=returned)
+    client = make_client(agent)
+    resp_id = _first_turn_response_id(client, "Tell me about Sybil")
+
+    # A restart loses all in-process state: swap in a fresh, empty store.
+    client.app.state.responses_state_store = ResponseStateStore(
+        ttl_seconds=1_800, max_entries=1_000
+    )
+
+    follow_up = client.post(
+        "/v1/responses",
+        headers=AUTH,
+        json={"input": "what did it use?", "previous_response_id": resp_id},
+    )
+
+    assert follow_up.status_code == 404
+    assert follow_up.json()["error"]["code"] == "previous_response_not_found"
+    assert len(agent.calls) == 1
+
+
 def test_size_limits_reject_before_state_lookup_or_provider_call(
     make_client: ClientFactory,
 ) -> None:
