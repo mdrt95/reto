@@ -416,7 +416,7 @@ def test_size_limits_reject_before_state_lookup_or_provider_call(
     assert agent.calls == []
 
 
-def test_first_turn_state_is_stored_under_the_new_response_id(
+def test_first_turn_state_is_persisted_for_a_later_follow_up(
     make_client: ClientFactory,
 ) -> None:
     returned = ConversationState(last_topic="skills", response_language="en")
@@ -424,17 +424,63 @@ def test_first_turn_state_is_stored_under_the_new_response_id(
     client = make_client(agent)
 
     resp_id = _first_turn_response_id(client, "What can Marco do?")
+    assert len(client.app.state.responses_state_store) == 1
 
-    assert client.app.state.responses_state_store.get(resp_id) == returned
+    follow_up = client.post(
+        "/v1/responses",
+        headers=AUTH,
+        json={"input": "tell me more", "previous_response_id": resp_id},
+    )
+    assert follow_up.status_code == 200
+    assert agent.calls[1]["state"] == returned
 
 
 def test_a_response_without_core_state_stores_nothing(make_client: ClientFactory) -> None:
     agent = RecordingAgent()  # returns state=None
     client = make_client(agent)
 
-    resp_id = _first_turn_response_id(client, "hi")
+    _first_turn_response_id(client, "hi")
 
-    assert client.app.state.responses_state_store.get(resp_id) is None
+    assert len(client.app.state.responses_state_store) == 0
+
+
+def test_previous_response_id_does_not_resolve_across_bearer_tokens(
+    make_client: ClientFactory,
+) -> None:
+    shared_store = ResponseStateStore(ttl_seconds=60, max_entries=8)
+    state = ConversationState(last_topic="projects", response_language="en")
+    client_a = make_client(
+        RecordingAgent(state=state),
+        responses_state_store=shared_store,
+        openai_compat_token="token-a",
+    )
+    client_b = make_client(
+        RecordingAgent(state=state),
+        responses_state_store=shared_store,
+        openai_compat_token="token-b",
+    )
+    auth_a = {"Authorization": "Bearer token-a"}
+    auth_b = {"Authorization": "Bearer token-b"}
+
+    first = client_a.post(
+        "/v1/responses", headers=auth_a, json={"input": "Tell me about Sybil"}
+    )
+    resp_id = first.json()["id"]
+
+    crossed = client_b.post(
+        "/v1/responses",
+        headers=auth_b,
+        json={"input": "what did it use?", "previous_response_id": resp_id},
+    )
+    assert crossed.status_code == 404
+    assert crossed.json()["error"]["code"] == "previous_response_not_found"
+
+    same_token = client_a.post(
+        "/v1/responses",
+        headers=auth_a,
+        json={"input": "what did it use?", "previous_response_id": resp_id},
+    )
+    assert same_token.status_code == 200
 
 
 def test_a_rejected_continuation_logs_a_stable_code_without_the_client_id(

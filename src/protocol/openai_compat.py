@@ -13,8 +13,10 @@ turns in ``input`` reach the core service as untrusted data.
 Continuity (issue #27): ``previous_response_id`` is resolved through a bounded,
 process-local store that maps the opaque ``resp_*`` ID to the compact verified
 ``ConversationState`` the core agent produced on that turn — catalog IDs and enum
-values only, never message or answer text. An ID that is unknown, expired, or
-malformed fails closed with a machine-readable ``previous_response_not_found``
+values only, never message or answer text. Store keys are namespaced by a
+non-reversible tag of the presenting bearer credential, so an ID never resolves
+under a different token. An ID that is unknown, expired, malformed, or
+cross-token fails closed with a machine-readable ``previous_response_not_found``
 error and no provider call; the client may then resend history in ``input``.
 
 Streaming (``stream: true``) returns a ``text/event-stream`` of Responses API
@@ -23,6 +25,7 @@ byte is emitted — the SSE sequence only frames an already-complete answer, so 
 carries no time-to-first-token benefit and cannot bypass the verification gate.
 """
 
+import hashlib
 import hmac
 import json
 import logging
@@ -219,21 +222,39 @@ def _client_host(request: Request) -> str:
     return request.client.host if request.client else "unknown"
 
 
+def _owner_tag(request: Request) -> str:
+    """A short non-reversible tag for the adapter credential the caller presented.
+
+    Snapshots are namespaced by this tag so a response ID minted under one bearer
+    token never resolves under another — after the operator rotates
+    ``OPENAI_COMPAT_TOKEN``, or if per-client tokens are introduced later. Auth
+    has already run, so a configured secret is guaranteed to be present.
+    """
+    configured = request.app.state.settings.openai_compat_token
+    secret = configured.get_secret_value().encode("utf-8")
+    return hashlib.sha256(secret).hexdigest()[:16]
+
+
+def _snapshot_key(request: Request, response_id: str) -> str:
+    """Namespace a bare ``resp_*`` ID by the presenting credential's owner tag."""
+    return f"{_owner_tag(request)}:{response_id}"
+
+
 def _resolve_prior_state(
     payload: ResponsesRequest, request: Request
 ) -> ConversationState | None:
     """Turn ``previous_response_id`` into stored verified state, or fail closed.
 
     A blank or absent ID is a fresh turn. Any non-empty ID that the bounded store
-    cannot resolve — unknown, expired, or malformed — is a
-    ``previous_response_not_found`` error raised before the core service is called.
-    The client-supplied ID is never logged or echoed.
+    cannot resolve — unknown, expired, malformed, or minted under a different
+    bearer token — is a ``previous_response_not_found`` error raised before the
+    core service is called. The client-supplied ID is never logged or echoed.
     """
     previous_id = (payload.previous_response_id or "").strip()
     if not previous_id:
         return None
     store: ResponseStateStore = request.app.state.responses_state_store
-    prior_state = store.get(previous_id)
+    prior_state = store.get(_snapshot_key(request, previous_id))
     if prior_state is None:
         raise _UnknownPreviousResponse()
     return prior_state
@@ -328,7 +349,9 @@ def create_response(payload: ResponsesRequest, request: Request) -> JSONResponse
     _log_completed(response_id, result, latency_ms, model_name)
 
     if result.state is not None:
-        request.app.state.responses_state_store.put(response_id, result.state)
+        request.app.state.responses_state_store.put(
+            _snapshot_key(request, response_id), result.state
+        )
 
     created_at = int(time())
     message_id = f"msg_{uuid4().hex}"
