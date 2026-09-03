@@ -163,27 +163,60 @@ Earlier `user` and `assistant` messages become bounded history. Text content par
 
 #### Continuing a conversation with `previous_response_id`
 
-Send the `resp_*` ID from a prior turn to continue it without resending history:
+Every response carries an `id` of the form `resp_` followed by 32 lowercase hex
+characters (message items use `msg_` on the same shape). Send that `id` from a
+prior turn as `previous_response_id` to continue the conversation without
+resending history:
 
 ```json
 {
   "input": "And his role there?",
-  "previous_response_id": "resp_<uuid-from-a-previous-turn>"
+  "previous_response_id": "resp_0f1e2d3c4b5a69788796a5b4c3d2e1f0"
 }
 ```
 
-The adapter resolves the ID against a bounded, process-local store that maps it to the compact verified `ConversationState` the core agent produced on that turn. That snapshot holds only verified referents — topic, source and entity IDs, focus, delivered-fact IDs, response language — matching the `state` object `/api/chat` returns. It never holds message or answer text and is not a transcript database. Snapshots expire after `RESPONSES_STATE_TTL_SECONDS`, the store is capped at `RESPONSES_STATE_MAX_ENTRIES` (oldest evicted first), and all snapshots are lost on process restart.
+The adapter resolves the ID against a bounded, process-local store that maps it to the compact verified `ConversationState` the core agent produced on that turn. That snapshot holds only verified referents — topic, source and entity IDs, focus, delivered-fact IDs, response language — matching the `state` object `/api/chat` returns. It never holds message or answer text and is not a transcript database.
 
-Resolution is untrusted like every other client input: guardrails, grounding, privacy checks, size limits, and the rate limiter all still run. You may also resend `user`/`assistant` items in `input` alongside `previous_response_id`; the resent items form the turn's bounded history and the snapshot supplies the verified referents.
+Continuation contract:
 
-An ID that is unknown, expired, or malformed fails closed with HTTP `404` and no provider call:
+- **Supported:** `previous_response_id` is honored via server-side resolution of verified state. It is not required — resending `user`/`assistant` items in `input` remains a valid way to continue.
+- **ID format:** `resp_` + 32 lowercase hex. Every turn mints a new ID; the one you send back is the previous turn's, not a stable session handle.
+- **Size limits:** a continuation is bounded exactly like any turn — `MAX_INPUT_CHARS` for the message and aggregate history, `MAX_HISTORY_MESSAGES` for resent items. The resolved snapshot does not count against these; it is already bounded by `ConversationState`'s own field limits.
+- **Expiration:** snapshots expire `RESPONSES_STATE_TTL_SECONDS` after they are written (default 1800), are **not** refreshed on read, and the store is capped at `RESPONSES_STATE_MAX_ENTRIES` with oldest-first eviction. All snapshots are lost on process restart and are not shared across instances.
+- **Error semantics:** an unknown, expired, or malformed `previous_response_id` fails closed with HTTP `404`, code `previous_response_not_found`, and no provider call. The client-supplied ID is never logged or echoed.
+- **Security invariants:** the resolved snapshot is untrusted input like everything else — guardrails, grounding, privacy checks, size limits, and the rate limiter all still run. No client-supplied conversation state is accepted; only an ID the server itself minted resolves, and only to state the server itself verified.
+
+You may resend `user`/`assistant` items in `input` alongside `previous_response_id`; the resent items form the turn's bounded history and the snapshot supplies the verified referents.
+
+A client that cannot retain the `resp_*` ID, or that targets a different instance or a restarted process, should fall back to resending prior `user`/`assistant` message items in `input`.
+
+Worked two-turn exchange:
+
+```jsonc
+// turn 1 request
+{ "model": "banorte-cv-agent", "input": "Where did Marco work?" }
+
+// turn 1 response (abridged)
+{ "id": "resp_0f1e2d3c4b5a69788796a5b4c3d2e1f0", "object": "response",
+  "status": "completed", "output_text": "Marco worked at Google.", "error": null }
+
+// turn 2 request — previous_response_id only, no resent history
+{ "input": "And his role there?",
+  "previous_response_id": "resp_0f1e2d3c4b5a69788796a5b4c3d2e1f0" }
+
+// turn 2 response (abridged) — a new id, grounded using the resolved referents
+{ "id": "resp_9a8b7c6d5e4f302118273645540f1e2d", "object": "response",
+  "status": "completed", "output_text": "He was a senior engineer there.", "error": null }
+```
+
+An unresolvable `previous_response_id` returns, with no provider call:
 
 ```json
 { "error": { "message": "Previous response not found or expired. Resend prior turns in 'input'.",
              "type": "invalid_request_error", "param": null, "code": "previous_response_not_found" } }
 ```
 
-A client that cannot retain the `resp_*` ID, or that targets a different instance or a restarted process, should fall back to resending prior `user`/`assistant` message items in `input`.
+`tests/test_responses_continuity_contract.py` pins this exchange as an executable, provider-free contract.
 
 A non-streaming success returns a Responses-shaped object with one assistant `output_text` message and a duplicate top-level `output_text`. The echoed `model` is the client-supplied string, or `banorte-cv-agent` when omitted. `usage` currently reports zeros because provider token accounting is not exposed through this adapter.
 
